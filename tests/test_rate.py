@@ -94,6 +94,24 @@ def test_misparsed_max_rejects_the_whole_tick():
     assert s.mp_loss == 0
 
 
+def test_rejected_max_falls_back_to_established_max_for_cur_check():
+    """The reported bug: real max HP is 866, but OCR drops the leading digit
+    on most ticks ('866' misread as '86'). Previously any tick whose max read
+    as implausible (86 is nowhere near the established 866) discarded cur
+    too, so HP loss barely moved even though cur was read correctly on every
+    tick. A max rejected as implausible garbage must fall back to the
+    established max for the cur-vs-max sanity check, not blank the whole
+    tick -- unlike a *plausible* max still awaiting corroboration (see
+    test_max_change_without_a_level_bump_needs_a_third_tick), which must
+    still discard the tick exactly as before."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=628, mp_cur=200, hp_max=866)  # establishes max
+    s.record(exp_cur=1000, hp_cur=600, mp_cur=200, hp_max=86)  # misread max, real drop
+    s.record(exp_cur=1000, hp_cur=550, mp_cur=200, hp_max=86)  # misread max, real drop
+    s.record(exp_cur=1000, hp_cur=550, mp_cur=200, hp_max=866)  # correct max again
+    assert s.hp_loss == 78  # 628 -> 600 (28) -> 550 (50); tracked despite the bad max reads
+
+
 def test_real_max_change_is_accepted_once_corroborated():
     """A level-up genuinely raises max -- the guard must not wedge shut.
     Accompanied by a level bump, 2 corroborating ticks suffice (see
@@ -158,6 +176,26 @@ def test_restart_carries_forward_last_values():
     assert s.mp_loss == 0
     s.record(exp_cur=1200, hp_cur=350, mp_cur=180)
     assert s.hp_loss == 50  # loss measured from the carried-forward baseline, not 0
+
+
+def test_sync_current_refreshes_stale_values_before_restart():
+    """While paused or stopped, record() -- and with it the cached cur values
+    start() carries forward -- is a no-op (see Session.pause()), so EXP/HP/MP
+    that changed during that time would otherwise be invisible: a restart
+    would baseline off however-stale a reading was current when the session
+    stopped, not the latest one on screen. sync_current() is what
+    overlay.py calls right before start() in exactly that situation."""
+    s = Session(require_calibration=False)
+    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
+    s.pause()
+    s.record(exp_cur=99999, hp_cur=1, mp_cur=1)  # no-op while paused -- must not leak in
+    s.sync_current(exp_cur=1300, hp_cur=450, mp_cur=190)
+    s.start()
+    assert s.start_exp == 1300
+    assert s.hp_loss == 0
+    assert s.mp_loss == 0
+    s.record(exp_cur=1300, hp_cur=400, mp_cur=190)
+    assert s.hp_loss == 50  # measured from the freshly-synced baseline, not the pre-pause one
 
 
 def test_summary_is_renamable_via_dataclasses_replace():

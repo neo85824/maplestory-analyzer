@@ -175,12 +175,32 @@ class _LossTracker:
         if cur is None:
             return
         if maximum is not None:
+            implausible = self._max is not None and self._max_is_implausible(maximum)
             accepted = self._accept_max(maximum, level)
             if level is not None:
                 self._last_level = level
+            if not accepted and not implausible:
+                return  # a legitimate max-change candidate, still awaiting corroboration
             if not accepted:
-                return  # misparsed tick -- don't let it near the loss math
-            if cur > maximum:
+                # An implausible max means *that digit* was misparsed -- it
+                # doesn't mean cur was. A max whose digits straddle a fragile
+                # spot (e.g. a trailing digit that blends into the closing
+                # bracket) can misread on the majority of ticks, and bailing
+                # out on the whole tick every time would throw away nearly
+                # all of a session's real cur readings along with the bad max
+                # ones (see test_rejected_max_falls_back_to_established_max_for_cur_check).
+                # But cur is only trustworthy here if it's *also* a small,
+                # sane move from the last accepted value -- a genuinely
+                # covered/garbage frame typically corrupts cur just as badly
+                # as max, and a wild cur must still be rejected outright
+                # rather than risk it quietly corroborating a second wild
+                # reading later (see test_no_single_tick_books_a_large_phantom_loss).
+                if self._last is None:
+                    return
+                tolerance = self._max * self.OUTLIER_FRACTION
+                if abs(cur - self._last) > tolerance:
+                    return
+            elif cur > maximum:
                 return  # cur can never exceed max; this reading is garbage
         if self._last is None:
             self._last = cur
@@ -209,6 +229,12 @@ class _LossTracker:
     # booked 25,347 of phantom loss when the panel came back.
     MAX_CHANGE_FACTOR = 2.0
 
+    def _max_is_implausible(self, maximum: int) -> bool:
+        """True if `maximum` is too far from the established max to ever be a
+        real level-up change -- see MAX_CHANGE_FACTOR's docstring above.
+        Assumes self._max is not None; callers check that first."""
+        return not (self._max / self.MAX_CHANGE_FACTOR <= maximum <= self._max * self.MAX_CHANGE_FACTOR)
+
     def _accept_max(self, maximum: int, level: int | None) -> bool:
         if maximum <= 0:
             return False
@@ -223,7 +249,7 @@ class _LossTracker:
             self._max_candidate = None
             self._max_candidate_count = 0
             return True
-        if not (self._max / self.MAX_CHANGE_FACTOR <= maximum <= self._max * self.MAX_CHANGE_FACTOR):
+        if self._max_is_implausible(maximum):
             return False  # implausible -- never adopt, however often it repeats
         level_bumped = (
             level is not None and self._last_level is not None and level > self._last_level
@@ -339,6 +365,22 @@ class Session:
         self._pause_started_at: float | None = None
         self._paused_total = 0.0
         self._resume_pending = False
+
+    def sync_current(self, exp_cur: int | None, hp_cur: int | None, mp_cur: int | None) -> None:
+        """Refresh the cached current values without touching loss/EXP
+        accounting -- call this right before start() when the session may
+        have been paused or stopped (record() is a no-op in both states, see
+        pause()), so the cached values can be arbitrarily stale relative to
+        what's on screen right now. Without this, restarting after a stop
+        baselines off whatever EXP/HP/MP happened to be current the instant
+        the session stopped, not the latest reading, silently under- or
+        over-counting whatever changed while it sat idle."""
+        if exp_cur is not None:
+            self._exp_cur = exp_cur
+        if hp_cur is not None:
+            self._hp_cur = hp_cur
+        if mp_cur is not None:
+            self._mp_cur = mp_cur
 
     def start(self, now: float | None = None) -> None:
         """Begin a new session. Carries forward whatever EXP/HP/MP values are

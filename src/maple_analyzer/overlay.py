@@ -426,15 +426,17 @@ class OverlayApp:
         add_kv_row(4, "hploss", "kv_hp_loss")
         add_kv_row(5, "mploss", "kv_mp_loss")
 
-        # Two buttons share one row: the left one cycles Pause/Resume/Start
-        # depending on _run_state (see _on_pause_button_clicked), the right
-        # one is the unconditional manual Restart -- hidden only in the
-        # "stopped" state, where Start already covers beginning a new
-        # session and a separate Restart would have nothing to restart from.
+        # Three buttons share one row: the left one cycles Pause/Resume/Start
+        # depending on _run_state (see _on_pause_button_clicked), the middle
+        # one is the unconditional manual Restart, the right one is the
+        # unconditional manual Stop -- both hidden only in the "stopped"
+        # state, where Start already covers beginning a new session and
+        # there's nothing left running/paused to restart or stop.
         button_row = ctk.CTkFrame(parent, fg_color="transparent")
         button_row.grid(row=3, column=0, sticky="ew", padx=2, pady=(0, 2))
         button_row.grid_columnconfigure(0, weight=1)
         button_row.grid_columnconfigure(1, weight=1)
+        button_row.grid_columnconfigure(2, weight=1)
 
         self._pause_button = ctk.CTkButton(
             button_row, command=self._on_pause_button_clicked,
@@ -449,7 +451,15 @@ class OverlayApp:
             corner_radius=9, height=BUTTON_HEIGHT,
         )
         self._i18n(self._restart_button, "restart_button", size=13, bold=True)
-        self._restart_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
+        self._restart_button.grid(row=0, column=1, sticky="ew", padx=3)
+
+        self._stop_button = ctk.CTkButton(
+            button_row, command=self._on_stop_clicked,
+            fg_color=SURFACE_2, hover_color=TRACK_BG, text_color=HP_COLOR,
+            corner_radius=9, height=BUTTON_HEIGHT,
+        )
+        self._i18n(self._stop_button, "stop_button", size=13, bold=True)
+        self._stop_button.grid(row=0, column=2, sticky="ew", padx=(3, 0))
 
     def _build_history_tab(self, parent) -> None:
         self._clear_history_button = ctk.CTkButton(
@@ -830,8 +840,28 @@ class OverlayApp:
     def _on_restart_clicked(self) -> None:
         if self._settings.save_on_restart:
             self._commit_session_to_history()
+        # Restart is reachable while "paused" (see _apply_run_state), during
+        # which record() -- and with it self._session's cached cur values --
+        # has been a no-op the whole time. Without this sync, start() below
+        # would baseline off however-stale a reading was current when Pause
+        # was clicked instead of the latest one on screen right now.
+        self._session.sync_current(self._last.exp_cur, self._last.hp_cur, self._last.mp_cur)
         self._session.start()  # resets pause state too, so a restart from "paused" lands in "running"
         self._run_state = "running"
+        self._apply_run_state()
+        self._render(self._last)  # immediate feedback, don't wait for next tick
+
+    def _on_stop_clicked(self) -> None:
+        """Manual equivalent of the timer rolling over with auto_stop on
+        (see _finalize_and_maybe_stop): always commits to History -- unlike
+        Restart, there's no "next session" being discarded here for
+        save_on_restart's opt-out to apply to -- then freezes the session via
+        pause() exactly the way auto-stop does, reusing "paused" as the
+        underlying state for "stopped" rather than adding a third one (see
+        that method's own comment)."""
+        self._commit_session_to_history()
+        self._session.pause()
+        self._run_state = "stopped"
         self._apply_run_state()
         self._render(self._last)  # immediate feedback, don't wait for next tick
 
@@ -845,6 +875,9 @@ class OverlayApp:
             self._session.resume()
             self._run_state = "running"
         else:  # "stopped" -- already committed to History by _finalize_and_maybe_stop
+            # Same staleness as _on_restart_clicked -- record() has been gated
+            # off the whole time the session sat "stopped".
+            self._session.sync_current(self._last.exp_cur, self._last.hp_cur, self._last.mp_cur)
             self._session.start()
             self._run_state = "running"
         self._apply_run_state()
@@ -860,12 +893,14 @@ class OverlayApp:
         # columns the way the two-button running/paused layout is.
         if self._run_state == "stopped":
             self._restart_button.grid_remove()
+            self._stop_button.grid_remove()
             self._pause_button.configure(width=STOPPED_BUTTON_WIDTH, height=BUTTON_HEIGHT)
-            self._pause_button.grid(row=0, column=0, columnspan=2, sticky="", padx=0)
+            self._pause_button.grid(row=0, column=0, columnspan=3, sticky="", padx=0)
         else:
             self._pause_button.configure(width=140, height=BUTTON_HEIGHT)  # CTkButton's own default width
             self._pause_button.grid(row=0, column=0, columnspan=1, sticky="ew", padx=(0, 3))
-            self._restart_button.grid(row=0, column=1, columnspan=1, sticky="ew", padx=(3, 0))
+            self._restart_button.grid(row=0, column=1, columnspan=1, sticky="ew", padx=3)
+            self._stop_button.grid(row=0, column=2, columnspan=1, sticky="ew", padx=(3, 0))
 
     def _rebuild_history_cards(self) -> None:
         for card in self._history_cards:

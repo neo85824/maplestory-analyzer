@@ -109,6 +109,7 @@ class _StubApp:
         self._timer_label = _StubWidget()
         self._pause_button = _StubWidget()
         self._restart_button = _StubWidget()
+        self._stop_button = _StubWidget()
         self._value_labels: dict = defaultdict(_StubWidget)
         self._bars: dict = defaultdict(_StubWidget)
 
@@ -135,6 +136,7 @@ class _StubApp:
     _commit_session_to_history = OverlayApp._commit_session_to_history
     _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
     _on_restart_clicked = OverlayApp._on_restart_clicked
+    _on_stop_clicked = OverlayApp._on_stop_clicked
     _on_pause_button_clicked = OverlayApp._on_pause_button_clicked
     _apply_run_state = OverlayApp._apply_run_state
     _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
@@ -178,6 +180,25 @@ def test_start_button_begins_tracking():
     _calibrate(app, gains=(100,))
     assert not app._session.is_calibrating
     assert app._session.start_exp == 100
+
+
+def test_start_after_stop_baselines_off_the_latest_exp_not_the_stale_one():
+    """record() -- and with it Session's cached exp_cur -- is a no-op the
+    whole time the app is "stopped" (see Session.pause()), but _do_tick keeps
+    updating app._last from live OCR regardless (that's how the HUD keeps
+    showing current numbers while stopped). EXP earned during that window
+    must not be silently absorbed into the next session's baseline."""
+    app = _StubApp()
+    app._on_pause_button_clicked()  # stopped -> running
+    _calibrate(app, gains=(100,))
+    app._settings.window_min = 1
+    app._session._start_time -= 61  # force auto-stop
+    app._do_tick()
+    assert app._run_state == "stopped"
+    app._source.exp += 500  # game keeps earning EXP while the overlay sits stopped
+    app._do_tick()  # HUD updates (app._last), but the stopped session does not record it
+    app._on_pause_button_clicked()  # "stopped" role: Start
+    assert app._session.start_exp == app._last.exp_cur
 
 
 # --- pause/resume via the same button -------------------------------------
@@ -248,6 +269,62 @@ def test_restart_can_be_configured_to_discard():
     app._session._start_time -= 5
     app._on_restart_clicked()
     assert app._session_history == []
+
+
+# --- manual Stop button -----------------------------------------------
+
+
+def test_stop_button_commits_and_stops():
+    app = _StubApp()
+    app._on_pause_button_clicked()  # stopped -> running
+    _calibrate(app, gains=(100,))
+    app._session._start_time -= 5  # past the 1s noise guard in _commit_session_to_history
+    app._on_stop_clicked()
+    assert app._run_state == "stopped"
+    assert len(app._session_history) == 1
+    assert app._restart_button.grid_info() == {}  # hidden while stopped
+    assert app._stop_button.grid_info() == {}  # hidden while stopped
+    elapsed_at_stop = app._session.elapsed()
+    app._do_tick()
+    assert app._session.elapsed() == elapsed_at_stop  # frozen, not overrunning
+
+
+def test_stop_button_always_commits_regardless_of_save_on_restart():
+    """Unlike Restart, Stop has no "next session" to weigh discarding against
+    -- save_on_restart governs that tradeoff for Restart only."""
+    app = _StubApp()
+    app._settings.save_on_restart = False
+    app._on_pause_button_clicked()
+    _calibrate(app, gains=(100,))
+    app._session._start_time -= 5
+    app._on_stop_clicked()
+    assert len(app._session_history) == 1
+
+
+def test_stop_button_reachable_from_paused():
+    app = _StubApp()
+    app._on_pause_button_clicked()  # stopped -> running
+    _calibrate(app, gains=(100,))
+    app._session._start_time -= 5
+    app._on_pause_button_clicked()  # running -> paused
+    app._on_stop_clicked()
+    assert app._run_state == "stopped"
+    assert len(app._session_history) == 1
+
+
+def test_stop_button_hidden_while_already_stopped():
+    app = _StubApp()
+    app._apply_run_state()  # OverlayApp.__init__ calls this once to lay out the "stopped" launch state
+    assert app._stop_button.grid_info() == {}
+    assert app._restart_button.grid_info() == {}
+
+
+def test_stop_button_visible_while_running_or_paused():
+    app = _StubApp()
+    app._on_pause_button_clicked()  # stopped -> running
+    assert app._stop_button.grid_info() != {}
+    app._on_pause_button_clicked()  # running -> paused
+    assert app._stop_button.grid_info() != {}
 
 
 # --- timer/auto-finalize survive a blocked capture window -----------------
