@@ -1,4 +1,4 @@
-"""Turn per-field OCR text (from regions.py's FIELD_BOXES + ocr.py's
+"""Turn per-field OCR text (from regions.py's field_boxes() + ocr.py's
 read_field()) into structured HP/MP/EXP/LV values.
 
 Each field is OCR'd from its own tightly-cropped, isolated box now (see the
@@ -91,7 +91,7 @@ def _find_level(text: str) -> int | None:
 
 def parse_fields(field_text: dict[str, str]) -> StatSnapshot:
     """field_text: {'LV': ..., 'HP': ..., 'MP': ..., 'EXP': ...} -- the raw
-    recognized text for each of regions.py's FIELD_BOXES."""
+    recognized text for each of regions.py's field_boxes()."""
     hp_cur, hp_max = _find_pair("HP", field_text.get("HP", ""))
     mp_cur, mp_max = _find_pair("MP", field_text.get("MP", ""))
     exp_cur, exp_pct = _find_exp(field_text.get("EXP", ""))

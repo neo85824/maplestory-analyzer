@@ -23,7 +23,7 @@ from typing import Protocol
 
 from PIL import Image
 
-from .regions import FIELD_BOXES, STAT_PANEL_BOX, scale_box
+from .regions import field_boxes, panel_box
 
 
 # Raised (as a RuntimeError message) when another window sits over the stat
@@ -42,8 +42,7 @@ def field_sample_points(client_size: tuple[int, int]) -> list[tuple[int, int]]:
     check with a few points can miss it.
     """
     points: list[tuple[int, int]] = []
-    for box in FIELD_BOXES.values():
-        b = scale_box(box, client_size)
+    for b in field_boxes(client_size).values():
         points += [
             (b.left + 1, b.top + 1), (b.right - 2, b.top + 1),
             (b.left + 1, b.bottom - 2), (b.right - 2, b.bottom - 2),
@@ -72,7 +71,7 @@ class WindowCapture(Protocol):
         ...
 
     def grab_fields(self) -> dict[str, Image.Image]:
-        """One crop per FIELD_BOXES entry ('LV'/'HP'/'MP'/'EXP'), for
+        """One crop per field_boxes() entry ('LV'/'HP'/'MP'/'EXP'), for
         recognition-only OCR -- see ocr.py's read_field()."""
         ...
 
@@ -87,13 +86,12 @@ class StaticImageCapture:
         return self._image.copy()
 
     def grab_panel(self) -> Image.Image:
-        box = scale_box(STAT_PANEL_BOX, self._image.size)
-        return self._image.crop(box.as_tuple())
+        return self._image.crop(panel_box(self._image.size).as_tuple())
 
     def grab_fields(self) -> dict[str, Image.Image]:
         return {
-            name: self._image.crop(scale_box(box, self._image.size).as_tuple())
-            for name, box in FIELD_BOXES.items()
+            name: self._image.crop(box.as_tuple())
+            for name, box in field_boxes(self._image.size).items()
         }
 
 
@@ -192,7 +190,7 @@ class GameWindowCapture:
     def grab_panel(self) -> Image.Image:
         left, top, right, bottom = self._client_rect_on_screen()
         client_size = (right - left, bottom - top)
-        box = scale_box(STAT_PANEL_BOX, client_size)
+        box = panel_box(client_size)
         shot = self._mss.grab({
             "left": left + box.left,
             "top": top + box.top,
@@ -223,21 +221,20 @@ class GameWindowCapture:
         if panel_is_obscured(points, self._hwnd, self._root_window_at):
             raise RuntimeError(PANEL_OBSCURED)
 
-        panel_box = scale_box(STAT_PANEL_BOX, client_size)
+        pbox = panel_box(client_size)
         shot = self._mss.grab({
-            "left": left + panel_box.left,
-            "top": top + panel_box.top,
-            "width": panel_box.right - panel_box.left,
-            "height": panel_box.bottom - panel_box.top,
+            "left": left + pbox.left,
+            "top": top + pbox.top,
+            "width": pbox.right - pbox.left,
+            "height": pbox.bottom - pbox.top,
         })
         panel = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
 
         fields = {}
-        for name, box in FIELD_BOXES.items():
-            field_box = scale_box(box, client_size)
+        for name, field_box in field_boxes(client_size).items():
             local = (
-                field_box.left - panel_box.left, field_box.top - panel_box.top,
-                field_box.right - panel_box.left, field_box.bottom - panel_box.top,
+                field_box.left - pbox.left, field_box.top - pbox.top,
+                field_box.right - pbox.left, field_box.bottom - pbox.top,
             )
             fields[name] = panel.crop(local)
         return fields

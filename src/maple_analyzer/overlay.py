@@ -3,7 +3,7 @@
 Per-tick timing (2026-08-17 rework, measured against the live game): the
 original whole-panel detection+recognition OCR pass was ~600-680ms/tick --
 detection (finding text regions) was the entire cost, not recognition. Since
-regions.py's FIELD_BOXES already pins down exactly where each field's text
+regions.py's field_boxes() already pins down exactly where each field's text
 is, detection was pure waste; switched to four small recognition-only calls
 (no detection stage) on individually pre-cropped fields, ~15ms each, ~60ms
 total. Capture itself is ~3.5ms. `_tick()` now also computes its own elapsed
@@ -724,7 +724,7 @@ class OverlayApp:
         if client_size is not None and client_size != self._last_client_size:
             self._log(f"[{time.strftime('%H:%M:%S')}] client size: {client_size[0]}x{client_size[1]}")
             self._last_client_size = client_size
-        field_text = {name: self._ocr.read_field(img) for name, img in field_images.items()}
+        field_text = {name: self._ocr.read_field(img, name) for name, img in field_images.items()}
         snap = parse_fields(field_text)
         self._log(f"[{time.strftime('%H:%M:%S')}] fields={field_text}")
         self._log(f"          -> {snap}")

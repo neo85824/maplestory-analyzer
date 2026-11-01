@@ -1,13 +1,12 @@
 """End-to-end golden-value regression: real capture crop -> real RapidOCR ->
 real parser, against the one known-good screenshot in samples/. This is the
 only test that exercises actual OCR inference (slow-ish, one-time model load)
--- it exists to catch regressions in FIELD_BOXES, the OCR wrapper, or the
-parser regexes that unit tests on synthetic strings wouldn't catch, since
+-- it exists to catch regressions in regions.py's boxes, the OCR wrapper, or
+the parser regexes that unit tests on synthetic strings wouldn't catch, since
 those don't touch real recognition output.
 
-Ground truth verified 2026-08-17 by cropping and visually inspecting
-samples/maple_story_ui.jpg (LV.44, HP[377/824], MP[1663/2816],
-EXP162950[38.05%]) and confirming it matches this pipeline's output.
+Ground truth read off samples/maple_story_new_ui_1366.png (new UI, client
+1366x768): LV.51, HP[373/922], MP[723/3290], EXP252463[33.72%].
 """
 import pytest
 
@@ -27,25 +26,27 @@ def ocr_engine():
 def snapshot(ocr_engine):
     capture = StaticImageCapture(SAMPLE_IMAGE)
     fields = capture.grab_fields()
-    field_text = {name: ocr_engine.read_field(img) for name, img in fields.items()}
+    field_text = {name: ocr_engine.read_field(img, name) for name, img in fields.items()}
     return parse_fields(field_text)
 
 
-def test_level(snapshot):
-    assert snapshot.level == 44
-
-
 def test_hp(snapshot):
-    assert (snapshot.hp_cur, snapshot.hp_max) == (377, 824)
+    assert (snapshot.hp_cur, snapshot.hp_max) == (373, 922)
 
 
 def test_mp(snapshot):
-    assert (snapshot.mp_cur, snapshot.mp_max) == (1663, 2816)
+    assert (snapshot.mp_cur, snapshot.mp_max) == (723, 3290)
 
 
 def test_exp(snapshot):
-    assert snapshot.exp_cur == 162950
-    assert snapshot.exp_pct == 38.05
+    assert snapshot.exp_cur == 252463
+    assert snapshot.exp_pct == 33.72
+
+
+def test_level(snapshot):
+    # The two-tile orange LV badge only reads correctly with the LV-specific
+    # binarisation in ocr.read_field (plain greyscale gives '50' for '51').
+    assert snapshot.level == 51
 
 
 def test_field_crops_are_nonempty(ocr_engine):

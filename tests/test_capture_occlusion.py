@@ -13,12 +13,13 @@ from __future__ import annotations
 import pytest
 
 from maple_analyzer.capture import field_sample_points, panel_is_obscured
-from maple_analyzer.regions import FIELD_BOXES, REFERENCE_CLIENT_SIZE, scale_box
+from maple_analyzer.regions import field_boxes
 
 GAME = 1000
 OTHER = 2000
 
-POINTS = field_sample_points(REFERENCE_CLIENT_SIZE)
+CLIENT = (1366, 768)
+POINTS = field_sample_points(CLIENT)
 
 
 def _always(hwnd):
@@ -56,9 +57,9 @@ def test_game_child_windows_do_not_count_as_covering():
 def test_sample_points_lie_inside_every_field_box():
     """Guards an off-by-one that would probe just outside the fields and so
     never detect anything -- a silently useless check."""
-    hit = {name: 0 for name in FIELD_BOXES}
-    for name, raw in FIELD_BOXES.items():
-        box = scale_box(raw, REFERENCE_CLIENT_SIZE)
+    boxes = field_boxes(CLIENT)
+    hit = {name: 0 for name in boxes}
+    for name, box in boxes.items():
         for x, y in POINTS:
             if box.left <= x < box.right and box.top <= y < box.bottom:
                 hit[name] += 1
@@ -67,9 +68,11 @@ def test_sample_points_lie_inside_every_field_box():
     assert sum(hit.values()) >= len(POINTS)
 
 
-def test_sample_points_scale_with_the_client():
-    small = field_sample_points((1351, 800))
-    large = field_sample_points((1920, 1077))
+def test_sample_points_track_the_client_width():
+    """HP/MP/EXP are right-anchored, so a wider client pushes their sample
+    points further right."""
+    small = field_sample_points((1280, 720))
+    large = field_sample_points((1920, 720))
     assert len(small) == len(large)
     assert max(x for x, _ in large) > max(x for x, _ in small)
 

@@ -82,7 +82,7 @@ class _StubSource:
 
 class _StubOcr:
     @staticmethod
-    def read_field(img):
+    def read_field(img, field=None):
         return img  # _StubSource already hands back text, not an image
 
 

@@ -1,31 +1,43 @@
-"""scale_box scaling math -- pure, no images/OCR."""
-from maple_analyzer.regions import FIELD_BOXES, REFERENCE_CLIENT_SIZE, STAT_PANEL_BOX, scale_box
+"""Edge-anchored crop geometry -- pure, no images/OCR."""
+import pytest
+
+from maple_analyzer.regions import field_boxes, panel_box
+
+CLIENT_SIZES = [(1024, 768), (1280, 720), (1366, 768), (1920, 1080), (2560, 1440)]
 
 
-def test_identity_scale_at_reference_size():
-    for box in [STAT_PANEL_BOX, *FIELD_BOXES.values()]:
-        assert scale_box(box, REFERENCE_CLIENT_SIZE).as_tuple() == box
+@pytest.mark.parametrize("client", CLIENT_SIZES)
+def test_field_boxes_lie_inside_the_panel_box(client):
+    panel = panel_box(client)
+    for name, b in field_boxes(client).items():
+        assert panel.left <= b.left < b.right <= panel.right, name
+        assert panel.top <= b.top < b.bottom <= panel.bottom, name
 
 
-def test_scales_proportionally():
-    ref_w, ref_h = REFERENCE_CLIENT_SIZE
-    box = scale_box(STAT_PANEL_BOX, (ref_w * 2, ref_h * 2))
-    assert box.as_tuple() == tuple(c * 2 for c in STAT_PANEL_BOX)
+@pytest.mark.parametrize("client", CLIENT_SIZES)
+def test_boxes_stay_within_the_client_and_are_usably_sized(client):
+    cw, ch = client
+    for name, b in field_boxes(client).items():
+        assert 0 <= b.left < b.right <= cw, name
+        assert 0 <= b.top < b.bottom <= ch, name
+        assert b.right - b.left >= 40, f"{name} too narrow at {client}"
+        assert b.bottom - b.top >= 10, f"{name} too short at {client}"
 
 
-def test_field_boxes_stay_within_panel_at_reference_size():
-    panel = scale_box(STAT_PANEL_BOX, REFERENCE_CLIENT_SIZE)
-    for name, box in FIELD_BOXES.items():
-        b = scale_box(box, REFERENCE_CLIENT_SIZE)
-        assert panel.left <= b.left and b.right <= panel.right, name
-        assert panel.top <= b.top and b.bottom <= panel.bottom, name
+@pytest.mark.parametrize("client", CLIENT_SIZES)
+def test_all_boxes_are_bottom_anchored(client):
+    """Same fixed distance from the client's bottom edge at every resolution."""
+    ch = client[1]
+    ups = {name: (ch - b.top, ch - b.bottom) for name, b in field_boxes(client).items()}
+    ref = {name: (768 - b.top, 768 - b.bottom) for name, b in field_boxes((1366, 768)).items()}
+    assert ups == ref
 
 
-def test_scale_at_known_working_resolutions():
-    # Confirmed working live per handover notes: 1366x768 and 1920x1080.
-    for client_size in [(1366, 768), (1920, 1080)]:
-        panel = scale_box(STAT_PANEL_BOX, client_size)
-        assert panel.left < panel.right and panel.top < panel.bottom
-        for box in FIELD_BOXES.values():
-            b = scale_box(box, client_size)
-            assert b.left < b.right and b.top < b.bottom
+def test_lv_is_left_anchored_and_hp_mp_exp_are_right_anchored():
+    narrow = field_boxes((1280, 720))
+    wide = field_boxes((1920, 720))
+    assert narrow["LV"].left == wide["LV"].left  # LV pinned to the left edge
+    for name in ("HP", "MP", "EXP"):
+        # right-pinned: box shifts right by exactly the width delta
+        assert wide[name].left - narrow[name].left == 1920 - 1280, name
+        assert wide[name].right - narrow[name].right == 1920 - 1280, name

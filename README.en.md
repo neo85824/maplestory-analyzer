@@ -31,6 +31,8 @@ anything to the game.
   reading live while paused, but nothing is added to EXP gained or HP/MP
   lost and the timer stops counting down; Resume picks back up from where
   it left off, and whatever happened during the pause isn't counted.
+- **Stop** — hit **Stop** while tracking or paused to end the current session
+  right away and save it to History, without waiting for the timer.
 - **Sessions** — stats reset on a timer (default 10 minutes, adjustable) so
   "EXP diff" always means "since this session started." When the timer ends
   it commits to History and stops by default (toggle off in Settings to go
@@ -63,9 +65,12 @@ anything to the game.
 - **Windows** — real screen capture needs a live Windows desktop; this
   won't run for real on macOS/Linux.
 - MapleStory installed and running.
-- **Game resolution: 1366×768 or larger recommended.** Verified working at
-  both 1366×768 and 1920×1080. Bigger windows render the stat text larger and
-  read more reliably; very small windows misread more often.
+- **Game UI: the new bottom status bar (2026-09 revamp) is supported.** The old
+  UI is no longer supported.
+- **Game resolution: verified at 1366×768.** The status-bar crop boxes are
+  anchored to the window edges (they don't scale with resolution), so any of
+  MapleStory's fixed resolution options should work — but only 1366×768 has
+  been verified.
 
 ## Install
 
@@ -125,7 +130,7 @@ identically whether started via the .exe or this command.
   titled `新楓之谷` by default. If your client's window title is different,
   this won't match it.
 - **Status pill says "Stat panel is covered."** Another window is sitting over
-  the game's bottom-left LV/HP/MP/EXP strip. The app reads that area off the
+  the game's bottom LV/HP/MP/EXP strip. The app reads that area off the
   screen, so whatever is on top would be read instead of your stats — it stops
   and waits rather than recording nonsense. Move the window (or the HUD) off
   that strip and tracking resumes within a couple of seconds. The countdown

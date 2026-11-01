@@ -1,101 +1,48 @@
-"""Do the crops survive a different resolution and aspect ratio?
+"""Do the crops actually land on the HUD text in a real screenshot?
 
-regions.py's boxes are pixels measured at REFERENCE_CLIENT_SIZE (1351x800) and
-scaled proportionally by scale_box(). Its docstring warns that this is a
-stopgap and shouldn't be trusted away from that exact size -- these tests
-measure how true that actually is, against a real second screenshot rather
-than a resized copy of the first one (resizing a screenshot does not reproduce
-how the game re-renders its UI at a different size, so it proves nothing).
+regions.py's boxes are fixed pixel insets from the client-area edges (the new-UI
+HUD is fixed pixel size and edge-anchored -- see that module's docstring). The
+game only offers a fixed list of client resolutions and the bar is
+pixel-identical across all of them, so the edge-anchor invariants in
+test_regions.py cover every resolution at once. This file pins the one thing
+those can't: that the measured offsets are right, against the real screenshot.
+
+Only one real sample is checked in (samples/maple_story_new_ui_1366.png, client
+1366x768 -- the resolution the tool is used at). A resized copy of a screenshot
+does not reproduce how the game re-renders its HUD, so it would prove nothing;
+adding coverage at another resolution needs a real capture at that resolution.
 """
 from __future__ import annotations
 
 import pytest
 from PIL import Image
 
-from conftest import SAMPLE_IMAGE_1920
+from conftest import SAMPLE_IMAGE
 from maple_analyzer.ocr import StatPanelOcr
 from maple_analyzer.parser import parse_fields
-from maple_analyzer.regions import (
-    FIELD_BOXES,
-    REFERENCE_CLIENT_SIZE,
-    STAT_PANEL_BOX,
-    scale_box,
-)
+from maple_analyzer.regions import field_boxes
 
-# Ground truth read off samples/maple_story_ui_1920.jpg by eye.
-TRUTH_1920 = {"level": 44, "hp": (824, 824), "mp": (2816, 2816), "exp_pct": 83.31}
-
-CLIENT_SIZES = [(1351, 800), (1366, 768), (1920, 1077), (1280, 720), (2560, 1440)]
+TRUTH = {"hp": (373, 922), "mp": (723, 3290), "exp_cur": 252463, "exp_pct": 33.72}
 
 
 @pytest.fixture(scope="module")
-def snapshot_1920():
-    image = Image.open(SAMPLE_IMAGE_1920).convert("RGB")
+def snapshot():
+    image = Image.open(SAMPLE_IMAGE).convert("RGB")
     ocr = StatPanelOcr()
     text = {
-        name: ocr.read_field(image.crop(scale_box(box, image.size).as_tuple()))
-        for name, box in FIELD_BOXES.items()
+        name: ocr.read_field(image.crop(box.as_tuple()), name)
+        for name, box in field_boxes(image.size).items()
     }
     return parse_fields(text), text
 
 
-def test_reference_size_is_the_identity_case():
-    for box in list(FIELD_BOXES.values()) + [STAT_PANEL_BOX]:
-        assert scale_box(box, REFERENCE_CLIENT_SIZE).as_tuple() == box
+def test_hp_mp_read_correctly(snapshot):
+    snap, text = snapshot
+    assert (snap.hp_cur, snap.hp_max) == TRUTH["hp"], text
+    assert (snap.mp_cur, snap.mp_max) == TRUTH["mp"], text
 
 
-@pytest.mark.parametrize("client", CLIENT_SIZES)
-def test_field_boxes_stay_inside_the_panel_box(client):
-    """Catches a scaling regression at any resolution without needing a
-    screenshot for each one."""
-    panel = scale_box(STAT_PANEL_BOX, client)
-    for name, raw in FIELD_BOXES.items():
-        box = scale_box(raw, client)
-        assert panel.left <= box.left < box.right <= panel.right, name
-        assert panel.top <= box.top < box.bottom <= panel.bottom, name
-        assert box.right - box.left >= 40, f"{name} too narrow at {client}"
-        assert box.bottom - box.top >= 10, f"{name} too short at {client}"
-
-
-@pytest.mark.parametrize("client", CLIENT_SIZES)
-def test_panel_box_stays_inside_the_client(client):
-    panel = scale_box(STAT_PANEL_BOX, client)
-    assert 0 <= panel.left < panel.right <= client[0]
-    assert 0 <= panel.top < panel.bottom <= client[1]
-
-
-def test_level_and_mp_read_correctly_at_1920(snapshot_1920):
-    """The geometry claim: proportional crops still land on the text at a
-    resolution and aspect ratio the boxes were never measured at."""
-    snap, text = snapshot_1920
-    assert snap.level == TRUTH_1920["level"], text
-    assert (snap.mp_cur, snap.mp_max) == TRUTH_1920["mp"], text
-
-
-def test_exp_percentage_reads_correctly_at_1920(snapshot_1920):
-    snap, text = snapshot_1920
-    assert snap.exp_pct == TRUTH_1920["exp_pct"], text
-
-
-@pytest.mark.xfail(
-    strict=True,
-    reason="OCR drops the '/' in 'HP[824/824]' at 1920, giving 'HP[824824]', "
-           "which _PAIR_RE rightly refuses to split -- a bare digit run has no "
-           "honest boundary. Open question: systematic at this resolution, or a "
-           "one-frame fluke? Needs more live frames before deciding on a fix. "
-           "See the plan's Phase 2.",
-)
-def test_hp_reads_correctly_at_1920(snapshot_1920):
-    snap, _text = snapshot_1920
-    assert (snap.hp_cur, snap.hp_max) == TRUTH_1920["hp"]
-
-
-def test_hp_failure_is_a_missing_separator_not_a_bad_crop(snapshot_1920):
-    """Pins *why* HP fails, so the xfail above can't be quietly satisfied by
-    some unrelated change. The digits are read correctly and in the right
-    order; only the separator is lost, which is a recognition problem, not a
-    cropping one."""
-    _snap, text = snapshot_1920
-    hp = text["HP"].replace(" ", "")
-    assert "824" in hp
-    assert hp.count("824") == 2, hp  # both numbers present, both correct
+def test_exp_reads_correctly(snapshot):
+    snap, text = snapshot
+    assert snap.exp_cur == TRUTH["exp_cur"], text
+    assert snap.exp_pct == TRUTH["exp_pct"], text
