@@ -6,7 +6,7 @@ venv/
 *.sqlite
 *.onnx
 .DS_Store
-overlay_std*.log
+overlay_*.log
 overlay.pid
 overlay_screenshot.png
 .pytest_cache/

@@ -1,19 +1,16 @@
-"""Window capture abstraction.
+"""Getting the stat bar's pixels: one small image per field, per tick.
 
-`WindowCapture.grab_panel()` returns a PIL image of just the stat panel region.
-Two implementations:
+Two sources, both exposing `grab_fields()` (the `FieldSource` protocol):
 
-- `GameWindowCapture` (Windows only): finds the MapleStory window by title via
-  pywin32, reads its client rect, grabs that rect off screen with `mss`. This is
-  the real production path.
-- `StaticImageCapture` (any platform): replays a single image file every call.
-  Used for dev/testing on machines without the game running (e.g. this repo's
-  Linux dev environment) -- proves out the OCR/parse/rate/overlay code without
-  needing Windows + a live client.
+- `GameWindowCapture` (Windows only): finds the MapleStory window by title and
+  owning process via pywin32, reads its client rect, and grabs the stat bar
+  off the screen with `mss`. The production path.
+- `StaticImageCapture` (any platform): cuts the same fields out of one image
+  file. Used by the tests, which have no game window to capture from.
 
-Call `get_capture()` to get whichever is appropriate for the current platform;
-pass `sample_path=` to force StaticImageCapture regardless of platform (useful
-for demos/tests on Windows too).
+`mss` grabs a screen *region*, not the game's own pixels, so anything sitting
+on top of the stat bar is what would reach OCR -- hence the occlusion check
+(`panel_is_obscured`) before every grab.
 """
 from __future__ import annotations
 
@@ -34,7 +31,7 @@ PANEL_OBSCURED = "stat panel is obscured"
 
 def field_sample_points(client_size: tuple[int, int]) -> list[tuple[int, int]]:
     """Client-relative points to probe for occlusion: the four corners of each
-    FIELD_BOX, inset by a pixel so a corner lands inside its own box.
+    field box, inset by a pixel so a corner lands inside its own box.
 
     Sampling per *field* rather than the panel as a whole is deliberate. A
     window clipping only the MP digits is the dangerous case -- the 'MP' label
@@ -61,15 +58,7 @@ def panel_is_obscured(sample_points, game_hwnd: int, window_at) -> bool:
     return any(window_at(x, y) != game_hwnd for x, y in sample_points)
 
 
-class WindowCapture(Protocol):
-    def grab_full(self) -> Image.Image:
-        """Full client-area frame."""
-        ...
-
-    def grab_panel(self) -> Image.Image:
-        """Just the stat panel crop, scaled to the current client size."""
-        ...
-
+class FieldSource(Protocol):
     def grab_fields(self) -> dict[str, Image.Image]:
         """One crop per field_boxes() entry ('LV'/'HP'/'MP'/'EXP'), for
         recognition-only OCR -- see ocr.py's read_field()."""
@@ -81,12 +70,6 @@ class StaticImageCapture:
 
     def __init__(self, path: str | Path):
         self._image = Image.open(path).convert("RGB")
-
-    def grab_full(self) -> Image.Image:
-        return self._image.copy()
-
-    def grab_panel(self) -> Image.Image:
-        return self._image.crop(panel_box(self._image.size).as_tuple())
 
     def grab_fields(self) -> dict[str, Image.Image]:
         return {
@@ -116,9 +99,8 @@ class GameWindowCapture:
         self._process_name = process_name.lower()
         self._hwnd: int | None = None
         # Last client size seen by grab_fields, for the overlay to log. Every
-        # crop in regions.py is scaled from this, so it is the single most
-        # useful number when diagnosing a bad read from a log after the fact
-        # -- and the one thing missing from every capture taken so far.
+        # crop in regions.py is positioned from this, so it is the single
+        # most useful number when diagnosing a bad read from a log afterwards.
         self.client_size: tuple[int, int] | None = None
 
     def _owning_process_name(self, hwnd: int) -> str:
@@ -182,23 +164,6 @@ class GameWindowCapture:
         right, bottom = self._win32gui.ClientToScreen(hwnd, (right, bottom))
         return left, top, right, bottom
 
-    def grab_full(self) -> Image.Image:
-        left, top, right, bottom = self._client_rect_on_screen()
-        shot = self._mss.grab({"left": left, "top": top, "width": right - left, "height": bottom - top})
-        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-
-    def grab_panel(self) -> Image.Image:
-        left, top, right, bottom = self._client_rect_on_screen()
-        client_size = (right - left, bottom - top)
-        box = panel_box(client_size)
-        shot = self._mss.grab({
-            "left": left + box.left,
-            "top": top + box.top,
-            "width": box.right - box.left,
-            "height": box.bottom - box.top,
-        })
-        return Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
-
     def _root_window_at(self, x: int, y: int) -> int:
         # GA_ROOT (2) resolves a child window/control to its top-level owner,
         # so the game's own children don't read as something covering it.
@@ -238,14 +203,3 @@ class GameWindowCapture:
             )
             fields[name] = panel.crop(local)
         return fields
-
-
-def get_capture(sample_path: str | Path | None = None) -> WindowCapture:
-    if sample_path is not None:
-        return StaticImageCapture(sample_path)
-    if sys.platform == "win32":
-        return GameWindowCapture()
-    raise RuntimeError(
-        "Real game capture requires Windows. Pass sample_path= to use "
-        "StaticImageCapture for dev/testing on this platform."
-    )

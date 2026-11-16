@@ -7,6 +7,11 @@ those don't touch real recognition output.
 
 Ground truth read off samples/maple_story_new_ui_1366.png (new UI, client
 1366x768): LV.51, HP[373/922], MP[723/3290], EXP252463[33.72%].
+
+It is also the only proof that regions.py's measured pixel offsets land on the
+text. One real sample is checked in, at the resolution the tool is used at. A
+resized copy of it would prove nothing about another resolution -- the game
+re-renders its bar at native size -- so more coverage needs a real capture.
 """
 import pytest
 

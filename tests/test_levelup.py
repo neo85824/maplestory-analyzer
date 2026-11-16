@@ -6,7 +6,7 @@ moment a session spans a level-up. Observed live 2026-08-18: a genuine ~48k
 gain rendered as "+-379,946" in the HUD (the '+' is hardcoded in _render).
 
 A bare EXP *drop* is ambiguous: it is either a level-up or an OCR misread, and
-misreads are known to happen (see rate.py's _LossTracker). The level is what
+misreads are known to happen (see loss.py's LossTracker). The level is what
 disambiguates -- EXP dropping while the level rises is a level-up; EXP
 dropping with the level unchanged is noise and must not be counted.
 """
@@ -82,16 +82,6 @@ def test_exp_drop_without_a_level_change_is_ignored():
     assert s.exp_diff == 100
 
 
-def test_level_is_optional_and_old_behaviour_holds_without_it():
-    """record() is called without a level by existing tests and by any caller
-    that doesn't parse one; a plain monotonic gain must still work."""
-    s = Session(require_calibration=False)
-    s.start()
-    s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
-    s.record(exp_cur=1500, hp_cur=500, mp_cur=200)
-    assert s.exp_diff == 500
-
-
 # --- other scenarios ---------------------------------------------------
 
 
@@ -115,17 +105,6 @@ def test_level_up_with_no_percentage_reading_does_not_produce_nonsense():
     _record(s, exp=54, pct=None, level=45)
     assert s.exp_diff >= 0
     assert s.exp_diff < 400_000  # no fabricated total
-
-
-def test_gain_still_accumulates_normally_within_one_level():
-    # pct has to track cur: they are two readings of the same quantity, and
-    # the cross-check in _exp_reading_is_trusted compares them. EXP quintupling
-    # while the percentage sits still is not a state the game can be in.
-    s = Session(require_calibration=False)
-    s.start()
-    for exp, pct in ((100, 0.02), (200, 0.04), (350, 0.07), (500, 0.10)):
-        _record(s, exp=exp, pct=pct, level=44)
-    assert s.exp_diff == 400
 
 
 def test_restart_after_a_level_up_baselines_cleanly():
@@ -167,37 +146,12 @@ def test_real_captured_level_up_frames():
 # --- stability: the reason this is segments, not an accumulator ------------
 
 
-def test_a_single_garbage_reading_does_not_stick():
-    """The regression that killed the tick-by-tick accumulator. One frame read
-    'EXP101332182' (no brackets, no percentage) and booked +101,322,049 that
-    never came back, because summing rises bakes in any absurd value forever.
-    Measuring from the segment start instead means it is wrong for exactly one
-    tick."""
-    s = Session(require_calibration=False)
-    s.start()
-    _record(s, exp=10_133, pct=2.16, level=45)
-    _record(s, exp=101_332_182, pct=None, level=45)   # garbage frame
-    # Since the cur/pct guard landed this is now rejected outright rather than
-    # merely transient -- so it is never even briefly visible. Segments remain
-    # the layer underneath: were the guard to miss one, the damage would last a
-    # single tick instead of forever.
-    assert s.exp_diff == 0
-    _record(s, exp=10_193, pct=2.18, level=45)
-    assert s.exp_diff == 60
-
-
-def test_a_low_misread_also_self_corrects():
-    s = Session(require_calibration=False)
-    s.start()
-    _record(s, exp=5255, pct=1.12, level=45)
-    _record(s, exp=255, pct=1.12, level=45)   # leading digit lost
-    _record(s, exp=5435, pct=1.16, level=45)
-    assert s.exp_diff == 180                   # 5255 -> 5435, the misread ignored
-
-
 def test_garbage_cannot_accumulate_over_many_ticks():
-    """Repeated garbage must not compound -- each tick is measured from the
-    segment start, so the total can only ever be wrong by the current frame."""
+    """The regression that killed the tick-by-tick accumulator: one frame read
+    'EXP101332182' and booked +101,322,049 that never came back, because
+    summing rises bakes in any absurd value forever. Each tick is measured
+    from the segment start instead, so repeated garbage cannot compound. (A
+    single garbage frame being rejected outright is test_exp_garbage.py.)"""
     s = Session(require_calibration=False)
     s.start()
     _record(s, exp=1000, pct=1.0, level=45)

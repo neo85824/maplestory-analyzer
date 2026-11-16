@@ -1,14 +1,10 @@
-"""Synthetic frame generator standing in for a live game window.
+"""Test helper: a fake "camera" whose EXP value changes every frame.
 
-This repo's dev environment has no Windows/game window to capture from, so this
-module fabricates plausible-looking successive frames by redrawing the EXP text
-in the reference screenshot with an incrementing value, using the EXP field's
-real pixel box (see regions.py). Everything downstream of this (OCR, parsing,
-rate calc, overlay) is the real pipeline running against real inference, not
-mocked -- only the "camera" is fake.
-
-Swap `DemoExpFeed` for `capture.GameWindowCapture` on Windows with the game
-running and nothing else changes.
+There is no game window on the dev box, and the one real screenshot never
+changes. This redraws the EXP text in that screenshot with an incrementing
+value, at the EXP field's real pixel box, so test_demo_feed.py can run real
+OCR and the real parser over several *different* frames in a row. Only the
+image is fabricated; nothing downstream is mocked.
 """
 from __future__ import annotations
 
@@ -17,8 +13,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont
 
-from .regions import field_boxes, panel_box
-
+from maple_analyzer.regions import field_boxes
 
 
 class DemoExpFeed:
@@ -56,15 +51,7 @@ class DemoExpFeed:
         draw.text((l, t - 2), f"EXP {self._exp}[{pct:05.2f}%]", font=self._font, fill=(230, 255, 120))
         return frame
 
-    def grab_panel(self) -> Image.Image:
-        self._exp += random.randint(*self._exp_per_tick)
-        frame = self._render_frame()
-        return frame.crop(panel_box(self._base.size).as_tuple())
-
     def grab_fields(self) -> dict[str, Image.Image]:
         self._exp += random.randint(*self._exp_per_tick)
         frame = self._render_frame()
         return {name: frame.crop(box.as_tuple()) for name, box in field_boxes(self._base.size).items()}
-
-    def grab_full(self) -> Image.Image:
-        return self._render_frame()

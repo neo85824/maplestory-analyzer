@@ -52,7 +52,7 @@ def test_a_garbage_first_exp_does_not_become_the_permanent_baseline():
 
 
 def test_repetition_alone_never_confirms_faster_than_the_minimum():
-    """The trap that sank two earlier _LossTracker designs (see its
+    """The trap that sank two earlier LossTracker designs (see its
     docstring and mp-loss-investigation-2026-08-17.md): when a window covers
     the panel the OCR garbage is *static*, identical every tick, so
     N-identical-reads certifies it exactly as happily as it certifies the
@@ -63,6 +63,9 @@ def test_repetition_alone_never_confirms_faster_than_the_minimum():
     for _ in range(Session.CALIB_TARGET - 1):
         _tick(s, mp=28163, mp_max=281616, hp=500, hp_max=824, exp=1000, exp_pct=10.0, level=44)
     assert s.is_calibrating  # one tick short of CALIB_TARGET -- must not have confirmed yet
+    # ...and it does still complete: an idle character moves nothing either.
+    _tick(s, mp=28163, mp_max=281616, hp=500, hp_max=824, exp=1000, exp_pct=10.0, level=44)
+    assert not s.is_calibrating
 
 
 def test_calibration_locks_onto_the_truth_before_real_garbage_arrives():
@@ -103,15 +106,6 @@ def test_live_ticks_confirm_in_two():
     assert s.is_calibrating
     _tick(s, hp=800, hp_max=824, mp=2800, mp_max=2816, exp=200, exp_pct=0.04, level=44)
     assert not s.is_calibrating  # EXP moving drives liveness for HP/MP's calibration too
-
-
-def test_static_ticks_need_a_third():
-    s = Session()
-    _tick(s, hp=800, hp_max=824, mp=2800, mp_max=2816, exp=100, exp_pct=0.02, level=44)
-    _tick(s, hp=800, hp_max=824, mp=2800, mp_max=2816, exp=100, exp_pct=0.02, level=44)
-    assert s.is_calibrating  # nothing moved -- 2 static ticks isn't enough
-    _tick(s, hp=800, hp_max=824, mp=2800, mp_max=2816, exp=100, exp_pct=0.02, level=44)
-    assert not s.is_calibrating
 
 
 # --- while calibrating, nothing is recorded -------------------------------

@@ -14,8 +14,6 @@ from __future__ import annotations
 
 from collections import defaultdict
 
-import pytest
-
 from maple_analyzer import overlay as overlay_module
 from maple_analyzer.overlay import OverlayApp
 from maple_analyzer.parser import StatSnapshot
@@ -124,26 +122,13 @@ class _StubApp:
     def _rebuild_history_cards(self):
         self.rebuild_calls += 1
 
-    # Bound to the real implementations -- these are the actual behaviour
-    # under test, not stand-ins.
-    _t = OverlayApp._t
-    _font = OverlayApp._font
-    _localize_error = OverlayApp._localize_error
-    _set_status_error = OverlayApp._set_status_error
-    _log = staticmethod(OverlayApp._log)
-    _modal = OverlayApp._modal
-    _do_tick = OverlayApp._do_tick
-    _save_crops = OverlayApp._save_crops
-    _render = OverlayApp._render
-    _update_timer_label = OverlayApp._update_timer_label
-    _maybe_finalize_on_timeout = OverlayApp._maybe_finalize_on_timeout
-    _commit_session_to_history = OverlayApp._commit_session_to_history
-    _finalize_and_maybe_stop = OverlayApp._finalize_and_maybe_stop
-    _on_restart_clicked = OverlayApp._on_restart_clicked
-    _on_stop_clicked = OverlayApp._on_stop_clicked
-    _on_pause_button_clicked = OverlayApp._on_pause_button_clicked
-    _apply_run_state = OverlayApp._apply_run_state
-    _on_delete_history_clicked = OverlayApp._on_delete_history_clicked
+
+# Everything else is the real OverlayApp method -- that behaviour is what is
+# under test. Copied over rather than listed one by one, so splitting a method
+# in overlay.py cannot leave the stub missing its other half.
+for _name, _member in vars(OverlayApp).items():
+    if not _name.startswith("__") and _name not in vars(_StubApp):
+        setattr(_StubApp, _name, _member)
 
 
 def _calibrate(app: _StubApp, gains=(100,)) -> None:

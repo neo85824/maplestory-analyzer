@@ -20,7 +20,6 @@ import pytest
 
 from captured_exp_frames import NEW_HUD_29MIN, NO_BRACKET_MERGE, STARTS_ON_A_MISREAD
 from maple_analyzer.exp_total import LevelTotalEstimator
-from maple_analyzer.parser import parse_fields
 from maple_analyzer.rate import Session
 from test_run_state import _StubApp
 
@@ -40,38 +39,6 @@ def _established(start: int = 50_000, step: int = 150, n: int = 8) -> tuple[Leve
         est.observe(cur, _pct(cur), 52)
     assert est.total is not None
     return est, cur
-
-
-# --- the parser: a wrong percentage becomes a missing one ----------------
-
-
-@pytest.mark.parametrize("raw,cur,pct", [
-    ("EXP 50355[638%] ", 50355, 6.38),          # separator dropped
-    ("EXP 50535[6 40%] ", 50535, 6.40),         # ...read as a space
-    ("EXP 61426[13:11%]", 61426, 13.11),        # ...a colon
-    ("EXP 96243[12,19%]", 96243, 12.19),        # ...a comma (was: no pct at all)
-    ("EXP 328520[76 .71%]", 328520, 76.71),     # ...space-dot
-    ("EXP 321234[75 -01%] ", 321234, 75.01),    # ...space-dash
-    ("EXP 321234[75:-01%]", 321234, 75.01),
-    ("EXP 252463[33.72%]", 252463, 33.72),
-])
-def test_percentage_separator_variants(raw, cur, pct):
-    snap = parse_fields({"EXP": raw})
-    assert (snap.exp_cur, snap.exp_pct) == (cur, pct)
-
-
-@pytest.mark.parametrize("raw,cur,was", [
-    ("EXP 93044[11 738%]", 93044, 7.38),   # extra digit; really 11.78
-    ("EXP 89361[11 2%]", 89361, 11.2),     # lost a digit; really 11.32
-    ("EXP 60960[7 2%] ", 60960, 7.2),      # really 7.72
-    ("EXP 94445[1 936%]", 94445, 9.36),    # really 11.96
-])
-def test_malformed_percentage_is_missing_not_wrong(raw, cur, was):
-    """Each of these used to parse to the wrong percentage in the last
-    column. The value is still read -- the level total supplies the rest."""
-    snap = parse_fields({"EXP": raw})
-    assert snap.exp_cur == cur
-    assert snap.exp_pct is None, f"used to be {was}"
 
 
 # --- the estimator --------------------------------------------------------

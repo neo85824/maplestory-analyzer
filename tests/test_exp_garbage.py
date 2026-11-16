@@ -1,9 +1,10 @@
-"""Rejecting garbage EXP readings, at the parser and at the session.
+"""Rejecting garbage EXP readings at the session.
 
 Three layers, each covering the previous one's blind spot:
 
 1. parser  -- the game renders EXP as `cur[pct%]`, so a read with no opening
-   bracket is structurally wrong and must not yield a number at all.
+   bracket is structurally wrong and must not yield a number at all
+   (tests/test_parser.py).
 2. session -- `cur` and `pct` are independent readings of the same quantity,
    so their ratio (the level's total EXP) cross-checks them.
 3. rate.py's segments -- whatever still slips through is transient, because
@@ -17,45 +18,7 @@ Every string below is verbatim from a live capture.
 """
 from __future__ import annotations
 
-import pytest
-
-from maple_analyzer.parser import parse_fields
 from maple_analyzer.rate import Session
-
-
-# --- layer 1: the parser -------------------------------------------------
-
-
-@pytest.mark.parametrize("raw,expected", [
-    ("EXP 322928[75 40%]", 322928),
-    ("EXP162950[3805%]", 162950),
-    ("EXP 5435[1 24%] ", 5435),
-    ("EXP 321675[75:11%] ", 321675),
-    ("EXP 52893[11 29%]", 52893),
-])
-def test_valid_readings_still_parse(raw, expected):
-    assert parse_fields({"EXP": raw}).exp_cur == expected
-
-
-@pytest.mark.parametrize("raw,would_have_been", [
-    ("EXP101332182", 101332182),              # booked +101,322,049 as gain
-    ("EXP 128832 75%] ", 128832),             # no '[', and the cross-check misses it
-    ("EXP526784178 8071 11819", 526784178),
-    ("EXP357041183.37%]", 357041183),         # missing '[' merged digits together
-    ("EXP629082 76 84716261", 629082),
-    ("EXP 21410052 ", 21410052),
-    ("EXP3691 94[86.20%]", 3691),             # digits split; old code took the first run
-])
-def test_structurally_broken_readings_are_unreadable(raw, would_have_been):
-    """Unreadable is the safe outcome: overlay carries the last good value
-    forward, exactly as it does for a blank field."""
-    assert parse_fields({"EXP": raw}).exp_cur is None
-
-
-def test_bracket_confusions_are_tolerated():
-    """OCR reads '[' as '(' or '{' often enough that rejecting those would
-    throw away good frames."""
-    assert parse_fields({"EXP": "EXP 404715(94 50%]"}).exp_cur == 404715
 
 
 # --- layer 2: the cur/pct cross-check ------------------------------------
@@ -85,15 +48,8 @@ def test_huge_jump_without_a_percentage_is_rejected():
     _rec(s, 10173, 2.17)
     _rec(s, 101332182, None)
     assert s.exp_diff == 40
-
-
-def test_finalize_after_a_rejected_frame_records_the_truth():
-    """The case segments alone cannot fix: the session timer firing on a
-    garbage frame used to write it to History permanently."""
-    s = Session(require_calibration=False); s.start()
-    _rec(s, 10133, 2.16)
-    _rec(s, 10173, 2.17)
-    _rec(s, 101332182, None)
+    # ...and the case segments alone cannot fix: the session timer firing on
+    # that frame used to write it to History permanently.
     assert s.finalize(interval_minutes=10).exp_gained == 40
 
 

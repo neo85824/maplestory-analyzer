@@ -19,7 +19,7 @@ def test_exp_diff_tracks_gain():
 
 
 def test_hp_mp_loss_only_accumulates_on_decrease():
-    # Normal-sized moves are within _LossTracker.OUTLIER_FRACTION and are
+    # Normal-sized moves are within LossTracker.OUTLIER_FRACTION and are
     # taken immediately -- the noise guards add no lag to ordinary play.
     s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=200)
@@ -115,7 +115,7 @@ def test_rejected_max_falls_back_to_established_max_for_cur_check():
 def test_real_max_change_is_accepted_once_corroborated():
     """A level-up genuinely raises max -- the guard must not wedge shut.
     Accompanied by a level bump, 2 corroborating ticks suffice (see
-    _LossTracker._accept_max's level-aware corroboration); with no level
+    LossTracker._accept_max's level-aware corroboration); with no level
     bump at all it takes 3 (test_level_change_without_a_level_bump_needs_a_third_tick)."""
     s = Session(require_calibration=False)
     s.record(exp_cur=1000, hp_cur=500, mp_cur=1663, mp_max=2816, level=44)

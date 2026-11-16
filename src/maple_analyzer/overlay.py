@@ -1,38 +1,27 @@
-"""Always-on-top HUD: capture -> OCR -> parse -> session -> redraw, on a timer.
+"""The always-on-top HUD window and the loop that drives everything.
 
-Per-tick timing (2026-08-17 rework, measured against the live game): the
-original whole-panel detection+recognition OCR pass was ~600-680ms/tick --
-detection (finding text regions) was the entire cost, not recognition. Since
-regions.py's field_boxes() already pins down exactly where each field's text
-is, detection was pure waste; switched to four small recognition-only calls
-(no detection stage) on individually pre-cropped fields, ~15ms each, ~60ms
-total. Capture itself is ~3.5ms. `_tick()` now also computes its own elapsed
-work time and schedules the next call at `TARGET_MS - elapsed`, floored at
-0, instead of the old fixed post-delay (which added TARGET_MS on top of
-whatever the work took, so it could never reach the target rate no matter
-how fast OCR got) -- this is what actually makes the real cycle approach
-TARGET_MS rather than merely bound the *added* delay to it.
+Every TARGET_MS the tick loop runs one cycle (`_do_tick`):
 
-UI (2026-08-17 rework, restyled same day per an HTML design preview the user
-approved): CustomTkinter, three tabs (Live/History/Settings). Status/session
-timer live in their own strip at the top of Live (a pill + a chip, not just
-another text row); stats and session info sit in aligned grids with tabular
-numerals; History renders each session as a card, not scrollback text. See
-~/.claude/notes/maplestory-analyzer/final-spec-2026-08-17.md Section 3 for
-the full spec. This module still only calls Session's public methods and
-reads StatSnapshot/SessionSummary fields -- the capture/OCR/parser engine
-(capture.py/ocr.py/parser.py/regions.py) is untouched by this rework, per
-the hard UI/engine separation rule in that same doc.
+    capture.py   grab one small image per field off the screen
+    ocr.py       recognise the text in each
+    parser.py    text -> StatSnapshot (numbers, or None where unreadable)
+    rate.py      Session.record(): EXP gained, HP/MP lost, level total
+    here         redraw the Live tab
 
-Settings + i18n (2026-08-17, later same day): all UI-layer settings live in
-one `Settings` struct (settings.py) instead of scattered instance attributes,
-so a future persistence layer can load/save it wholesale. All user-facing
-strings route through `self._t(key)` into i18n.py's translation table (English
-+ Traditional Chinese, zh default) instead of literals inline here -- static
-widgets built once register themselves in `self._i18n_labels` so a language
-switch can walk the list and reconfigure every one of them, tabs get renamed
-via CTkTabview.rename(), and History cards (built dynamically per session) are
-simply torn down and rebuilt from `self._session_history` on switch.
+This module owns only the window, the run state (running/paused/stopped) and
+the History list. Everything about *what the numbers mean* lives in rate.py
+and below, and this module only calls Session's public methods and reads
+StatSnapshot/SessionSummary fields -- the UI/engine separation rule.
+
+Timing: OCR is recognition-only on four pre-cropped fields (~15ms each); the
+tick schedules its successor at TARGET_MS minus its own work time, so the
+real cycle approaches TARGET_MS rather than adding to it.
+
+UI: CustomTkinter, three tabs (Live / History / Settings). All settings live
+in one `Settings` struct (settings.py). Every user-facing string goes through
+`self._t(key)` into i18n.py (English + Traditional Chinese); static widgets
+register in `self._i18n_labels` so a language switch can re-text them, and
+History cards are simply rebuilt.
 """
 from __future__ import annotations
 
@@ -43,11 +32,10 @@ import sys
 import time
 import tkinter as tk
 from tkinter import messagebox, simpledialog
-from typing import Protocol
 
 import customtkinter as ctk
 
-from .capture import PANEL_OBSCURED
+from .capture import PANEL_OBSCURED, FieldSource
 from .i18n import Lang, t
 from .ocr import StatPanelOcr
 from .parser import StatSnapshot, parse_fields
@@ -148,11 +136,6 @@ _FONT_MONO_SM = ("Consolas", 10)
 _FONT_MONO_BOLD = ("Consolas", 12, "bold")
 
 
-class PanelSource(Protocol):
-    def grab_fields(self) -> dict:
-        ...
-
-
 def _fmt_duration(seconds: float) -> str:
     seconds = max(0, int(seconds))
     h, rem = divmod(seconds, 3600)
@@ -186,7 +169,7 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
 
 
 class OverlayApp:
-    def __init__(self, source: PanelSource, save_crops_dir: str | os.PathLike | None = None):
+    def __init__(self, source: FieldSource, save_crops_dir: str | os.PathLike | None = None):
         """save_crops_dir: debug aid -- when set, the field images behind
         every rejected reading are written there, see _save_crops."""
         self._source = source
@@ -695,62 +678,76 @@ class OverlayApp:
             print(message, flush=True)
 
     def _do_tick(self) -> int:
+        """One cycle: capture -> OCR -> parse -> record -> redraw. Returns the
+        delay in ms before the next one."""
         t0 = time.perf_counter()
         try:
             field_images = self._source.grab_fields()
         except RuntimeError as e:
-            # Game window gone (closed/crashed), minimized, or the stat panel
-            # is covered by another window -- don't crash the HUD, show it
-            # plainly and keep retrying at a slower pace in case it clears.
-            #
-            # Logged on *transition* only: this path produces no other output,
-            # so a persistently obscured panel used to leave a completely
-            # empty log with nothing to diagnose from -- but logging every
-            # 2s retry would bury the real ticks.
-            if str(e) != self._last_capture_error:
-                self._log(f"[{time.strftime('%H:%M:%S')}] capture unavailable: {e}")
-                self._last_capture_error = str(e)
-            self._set_status_error(self._localize_error(str(e)))
-            # The session clock is wall-clock time (Session.elapsed()), not
-            # tick-driven, so it keeps running even while OCR can't read the
-            # panel (game window covered, alt-tabbed away, minimized). Both
-            # of these used to be skipped entirely on this path: the timer
-            # chip froze at its last-rendered text even though the real
-            # countdown kept going underneath, and a session whose window
-            # stayed blocked past its interval would never auto-finalize at
-            # all, silently overrunning forever.
-            self._update_timer_label()
-            self._maybe_finalize_on_timeout()
-            return 2000
+            return self._on_capture_failed(str(e))
         if self._last_capture_error is not None:
             self._log(f"[{time.strftime('%H:%M:%S')}] capture recovered")
             self._last_capture_error = None
 
-        # Every crop is scaled from the client size (regions.py), so a log
-        # without it can't explain a bad read -- and a mid-session resize is
-        # exactly the kind of thing that moves the panel out from under the
-        # boxes. Logged once at startup and again on any change.
+        # Every crop is positioned from the client size (regions.py), so a
+        # log without it can't explain a bad read. Logged once at startup
+        # and again on any change.
         client_size = getattr(self._source, "client_size", None)
         if client_size is not None and client_size != self._last_client_size:
             self._log(f"[{time.strftime('%H:%M:%S')}] client size: {client_size[0]}x{client_size[1]}")
             self._last_client_size = client_size
+
         field_text = {name: self._ocr.read_field(img, name) for name, img in field_images.items()}
         snap = parse_fields(field_text)
         self._log(f"[{time.strftime('%H:%M:%S')}] fields={field_text}")
         self._log(f"          -> {snap}")
-        # A single tick occasionally misses a field (combat effects/floating
-        # damage numbers over the HP/MP bars, transient OCR confidence dips) --
-        # observed live: HP briefly read as None while MP/EXP/LV parsed fine on
-        # the same frame. Carry forward the last known value per field instead
-        # of flickering to '--' on every miss; a field that's genuinely gone
-        # (e.g. OCR permanently broken) will just show stale data, which is a
-        # more honest failure mode than a blank field for a live number.
-        #
-        # A current value above its own maximum is not a reading at all --
-        # 'MP [7200/3360]' for 1200 was 142 ticks of a live capture, each one
-        # drawn on the HUD as 7200/3360 with a full bar. Session already
-        # refuses those (rate.py's _LossTracker); blanking them here first
-        # makes the HUD hold the last real value too.
+
+        rejected = self._drop_impossible_readings(snap)
+        self._count_unreadable(snap)
+        merged, exp_rejected = self._merge_and_record(snap)
+        if exp_rejected:
+            rejected.append("EXP")
+        if rejected and self._save_crops_dir is not None:
+            self._save_crops(rejected, field_images, field_text)
+        self._last = merged
+
+        self._maybe_finalize_on_timeout()
+        self._render(merged)
+        elapsed_ms = (time.perf_counter() - t0) * 1000
+        return max(0, int(TARGET_MS - elapsed_ms))
+
+    def _on_capture_failed(self, message: str) -> int:
+        """Game window gone (closed/crashed), minimized, or the stat panel is
+        covered by another window. Routine: say so on the status pill and
+        retry at a slower pace."""
+        # Logged on *transition* only: this path produces no other output, so
+        # a persistently obscured panel used to leave a completely empty log
+        # -- but logging every 2s retry would bury the real ticks.
+        if message != self._last_capture_error:
+            self._log(f"[{time.strftime('%H:%M:%S')}] capture unavailable: {message}")
+            self._last_capture_error = message
+        self._set_status_error(self._localize_error(message))
+        # The session clock is wall-clock time (Session.elapsed()), not
+        # tick-driven, so it keeps running while the panel can't be read.
+        # Both calls below used to be skipped on this path: the timer chip
+        # froze at its last text while the real countdown kept going, and a
+        # session whose window stayed blocked past its interval never
+        # auto-finalized at all.
+        self._update_timer_label()
+        self._maybe_finalize_on_timeout()
+        return 2000
+
+    @staticmethod
+    def _drop_impossible_readings(snap: StatSnapshot) -> list[str]:
+        """Blank any HP/MP pair whose current value is above its own maximum,
+        and return which fields that was.
+
+        Such a pair is not a reading at all -- 'MP [7200/3360]' for 1200 was
+        142 ticks of a live capture, each one drawn on the HUD as 7200/3360
+        with a full bar. Session already refuses those (loss.py's
+        LossTracker); blanking them here first makes the HUD hold the last
+        real value too.
+        """
         rejected: list[str] = []
         if snap.hp_cur is not None and snap.hp_max is not None and snap.hp_cur > snap.hp_max:
             snap.hp_cur = snap.hp_max = None
@@ -758,81 +755,78 @@ class OverlayApp:
         if snap.mp_cur is not None and snap.mp_max is not None and snap.mp_cur > snap.mp_max:
             snap.mp_cur = snap.mp_max = None
             rejected.append("MP")
+        return rejected
 
-        # Capture succeeded but nothing on the bar could be read. Until this
-        # check existed the HUD just kept its last numbers under a normal
-        # "Tracking"/"Idle" status -- one live capture ended with nine minutes
-        # of blank reads and nothing on screen to say so.
+    def _count_unreadable(self, snap: StatSnapshot) -> None:
+        """Track how long capture has succeeded with nothing on the bar
+        readable -- the game dimmed because it lost focus, a loading screen.
+        _render turns a long enough run into a status. Until this existed the
+        HUD kept its last numbers under a normal "Tracking"/"Idle" status; one
+        live capture ended with nine minutes of blank reads and nothing on
+        screen to say so."""
         if snap.hp_cur is None and snap.mp_cur is None and snap.exp_cur is None:
             self._unreadable_ticks += 1
             if self._unreadable_ticks == UNREADABLE_TICKS:
                 self._log(f"[{time.strftime('%H:%M:%S')}] nothing readable for {UNREADABLE_TICKS} ticks")
         else:
             self._unreadable_ticks = 0
+
+    def _merge_and_record(self, snap: StatSnapshot) -> tuple[StatSnapshot, bool]:
+        """Turn this tick's reading into what the HUD shows, feeding the
+        session on the way. Returns that snapshot and whether this tick's EXP
+        reading was rejected.
+
+        LV/HP/MP: a single tick occasionally misses a field (a skill effect
+        or floating damage numbers over the bar), so each carries its last
+        known value forward instead of flickering to '--'. A field that is
+        genuinely gone just shows stale data.
+
+        EXP is handled as a pair. cur and pct only mean something together,
+        from the same frame -- their ratio is the level total -- so the
+        session gets this tick's own pair (None when unreadable), never this
+        tick's cur with an older tick's pct. What is shown is the last pair
+        that agreed with the level total established over many ticks
+        (exp_total.py): about one live reading in six is a misread
+        ('98700[1 50%]' for 12.50%) and those are treated like an unreadable
+        field.
+        """
         merged = StatSnapshot(*(
             new if new is not None else old
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
-        # hp_max/mp_max are passed purely so Session can sanity-check them --
-        # a tick whose max doesn't match the rest of the session was misparsed
-        # (see rate.py's _LossTracker) and is dropped before it can inflate the
-        # loss totals.
-        #
-        # There used to be a "does this frame even look like the stat panel?"
-        # gate here (reject the tick unless LV parsed). It was removed after
-        # ablating it against both live captures: it changed the totals by
-        # exactly zero, because rate.py already rejects those same frames one
-        # layer down -- and it carried a real risk of its own, since a broken
-        # LV crop would have stopped a session recording anything at all.
-        # tests/test_captured_regression.py replays the real failure through
-        # this path with no gate in front of it.
-        # Gated on run_state rather than relying on Session's own pause/no-op
-        # behaviour: while "stopped" the Session may never have been started
-        # at all (see _run_state's docstring in __init__), and feeding it
-        # ticks here would silently begin calibrating/tracking a session the
-        # user hasn't asked for yet.
-        #
-        # EXP goes in as this tick's own reading (None when unreadable), not
-        # the carried-forward one: cur and pct only mean something as a pair
-        # from the same frame (their ratio is the level total), and the
-        # generic merge above pairs this tick's cur with an older tick's pct
-        # whenever the percentage alone fails to parse.
         exp_cur = snap.exp_cur
         exp_pct = snap.exp_pct if exp_cur is not None else None
+        # Gated on run_state rather than on Session's own pause/no-op
+        # behaviour: while "stopped" the Session may never have been started
+        # at all (see _run_state in __init__), and feeding it ticks would
+        # begin calibrating a session the user hasn't asked for.
+        #
+        # There is deliberately no "does this frame look like the stat bar?"
+        # gate in front of record(). One existed (reject unless LV parsed)
+        # and was removed after ablating it against live captures: it changed
+        # the totals by exactly zero, because Session rejects those frames
+        # itself, and a broken LV crop would have stopped all recording.
         if self._run_state == "running":
+            # hp_max/mp_max go along purely so Session can sanity-check them.
             self._session.record(
                 exp_cur, merged.hp_cur, merged.mp_cur, exp_pct,
                 hp_max=merged.hp_max, mp_max=merged.mp_max, level=merged.level,
             )
         else:
             # Still shown to the level-total estimator, so the percentages on
-            # screen are right while stopped/paused and already settled by the
-            # time a session starts.
+            # screen are right while stopped/paused and already settled by
+            # the time a session starts.
             self._session.observe_exp(exp_cur, exp_pct, merged.level)
-        # What the HUD shows for EXP is the last reading that agreed with the
-        # level total established over many ticks (exp_total.py). About one
-        # live reading in six is a misread -- '98700[1 50%]' for 12.50% -- and
-        # those are treated like an unreadable field: the last good pair stays.
         merged.exp_cur, merged.exp_pct = self._session.exp_reading
-        if exp_cur is not None and exp_cur != merged.exp_cur:
+
+        exp_rejected = exp_cur is not None and exp_cur != merged.exp_cur
+        if exp_rejected:
             # Debug runs only (the .exe logs to nul): without this line a log
             # shows what was read but not that it was thrown away, or why.
             total = self._session.total_exp
-            self._log(
-                f"          EXP reading rejected: {exp_cur} [{exp_pct}%] disagrees with level total "
-                f"~{total:,.0f}; showing {merged.exp_cur}" if total else
-                f"          EXP reading rejected: {exp_cur} [{exp_pct}%]; showing {merged.exp_cur}"
-            )
-            rejected.append("EXP")
-        if rejected and self._save_crops_dir is not None:
-            self._save_crops(rejected, field_images, field_text)
-        self._last = merged
-
-        self._maybe_finalize_on_timeout()
-
-        self._render(merged)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        return max(0, int(TARGET_MS - elapsed_ms))
+            against = f" disagrees with level total ~{total:,.0f}" if total else ""
+            self._log(f"          EXP reading rejected: {exp_cur} [{exp_pct}%]{against}; showing {merged.exp_cur}")
+        return merged, exp_rejected
 
     def _save_crops(self, fields: list[str], images: dict, texts: dict[str, str]) -> None:
         """Debug aid, off unless a directory was given at construction.
@@ -1178,119 +1172,91 @@ class OverlayApp:
     # ---- render --------------------------------------------------------
 
     def _render(self, snap: StatSnapshot) -> None:
+        self._render_stats(snap)
+        self._update_timer_label()
+        self._render_session(snap)
+        self._render_status()
+
+    def _render_stats(self, snap: StatSnapshot) -> None:
+        """The LV/HP/MP/EXP rows and their bars."""
         self._value_labels["level"].configure(text=str(snap.level) if snap.level is not None else "--")
 
-        if snap.hp_cur is not None:
-            self._value_labels["hp"].configure(text=f"{snap.hp_cur}/{snap.hp_max}")
-            if snap.hp_max:
-                self._bars["hp"].set(max(0.0, min(1.0, snap.hp_cur / snap.hp_max)))
-        else:
-            self._value_labels["hp"].configure(text="--")
+        for key, cur, maximum in (("hp", snap.hp_cur, snap.hp_max), ("mp", snap.mp_cur, snap.mp_max)):
+            if cur is None:
+                self._value_labels[key].configure(text="--")
+                continue
+            self._value_labels[key].configure(text=f"{cur}/{maximum}")
+            if maximum:
+                self._bars[key].set(max(0.0, min(1.0, cur / maximum)))
 
-        if snap.mp_cur is not None:
-            self._value_labels["mp"].configure(text=f"{snap.mp_cur}/{snap.mp_max}")
-            if snap.mp_max:
-                self._bars["mp"].set(max(0.0, min(1.0, snap.mp_cur / snap.mp_max)))
-        else:
-            self._value_labels["mp"].configure(text="--")
-
-        pct = f"  ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None and self._settings.show_exp_pct else ""
-        if snap.exp_cur is not None:
-            self._value_labels["exp"].configure(text=f"{snap.exp_cur:,}{pct}")
-            if snap.exp_pct is not None:
-                self._bars["exp"].set(max(0.0, min(1.0, snap.exp_pct / 100)))
-        else:
+        if snap.exp_cur is None:
             self._value_labels["exp"].configure(text="--")
+            return
+        pct = f"  ({snap.exp_pct:.2f}%)" if snap.exp_pct is not None and self._settings.show_exp_pct else ""
+        self._value_labels["exp"].configure(text=f"{snap.exp_cur:,}{pct}")
+        if snap.exp_pct is not None:
+            self._bars["exp"].set(max(0.0, min(1.0, snap.exp_pct / 100)))
 
-        start_exp = self._session.start_exp
+    def _render_session(self, snap: StatSnapshot) -> None:
+        """Start EXP, EXP gained, level-up ETA, projected EXP, HP/MP loss."""
+        session, show_pct = self._session, self._settings.show_exp_pct
+        start_exp = session.start_exp
         self._value_labels["startexp"].configure(text=f"{start_exp:,}" if start_exp is not None else "--")
-
-        self._update_timer_label()
-
-        exp_diff = self._session.exp_diff
-        # Total EXP required for the current level isn't shown directly by the
-        # game, but can be derived from any single tick that has both the
-        # absolute value and percentage: total = cur / (pct/100). Anchoring
-        # off the current tick (rather than diffing OCR'd percentages
-        # directly) is more robust since per-level EXP totals are constant,
-        # while independently-read percentages carry their own OCR noise on
-        # top of the cur value's.
-        #
-        # A single tick is only the fallback now: about one live reading in
-        # six is misread, and dividing by that tick's own total showed e.g.
-        # an EXP gain of +0.21% for a real +2.1% whenever '12.50%' was read as
-        # '1 50%'. The session's level total is a consensus over many readings
-        # and does not move with one bad tick -- see exp_total.py.
-        total_exp = self._session.total_exp or (
-            snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
-        )
 
         # As a percentage the gain is added up level by level (see
         # Session.exp_pct_gained), not divided by the current level's total.
-        pct_gained = self._session.exp_pct_gained
+        exp_diff, pct_gained = session.exp_diff, session.exp_pct_gained
         if exp_diff is not None:
-            pct_s = f"  (+{pct_gained:.2f}%)" if pct_gained is not None and self._settings.show_exp_pct else ""
+            pct_s = f"  (+{pct_gained:.2f}%)" if pct_gained is not None and show_pct else ""
             self._value_labels["expdiff"].configure(text=f"+{exp_diff:,}{pct_s}")
         else:
             self._value_labels["expdiff"].configure(text="--")
 
-        # ETA to level up: current session's EXP/sec rate, projected against
-        # the EXP still needed (total - cur). Needs a few seconds of session
-        # data first -- extrapolating off a 1-2 second sample swings wildly.
-        elapsed = self._session.elapsed()
+        # ETA to level up: the session's EXP/sec so far, against the EXP
+        # still needed. The level's total EXP is never printed by the game;
+        # it is cur / (pct/100). The session's figure is a consensus over
+        # many readings (exp_total.py) and does not move with one bad tick --
+        # a single tick's own ratio is only the fallback before that exists.
+        # Needs a few seconds of data first: a 1-2 second sample swings wildly.
+        total_exp = session.total_exp or (
+            snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
+        )
+        elapsed = session.elapsed()
         eta_s = None
         if exp_diff and exp_diff > 0 and elapsed > 3 and total_exp and snap.exp_cur:
-            rate_per_sec = exp_diff / elapsed
-            remaining_exp = total_exp - snap.exp_cur
-            if rate_per_sec > 0:
-                eta_s = remaining_exp / rate_per_sec
+            eta_s = (total_exp - snap.exp_cur) / (exp_diff / elapsed)
         self._value_labels["eta"].configure(text=_fmt_duration(eta_s) if eta_s is not None else "--")
 
-        # Projected session total: current rate extrapolated across the full
-        # window setting, not just what's elapsed so far -- see
-        # Session.projected_exp (same 3s/positive-gain guard as ETA above,
-        # for the same reason).
-        proj = self._session.projected_exp(self._settings.window_min * 60)
+        # Projected session total: the current rate across the whole window
+        # setting (Session.projected_exp, same 3s/positive-gain guard). Its
+        # percentage is the gain's, stretched by the same factor.
+        proj = session.projected_exp(self._settings.window_min * 60)
         if proj is not None:
-            # Same scale as the gain so far: the projection is that gain
-            # stretched over the whole window, in EXP and in percent alike.
             proj_pct = pct_gained * proj / exp_diff if pct_gained is not None and exp_diff else None
-            proj_pct_s = f"  (+{proj_pct:.2f}%)" if proj_pct is not None and self._settings.show_exp_pct else ""
+            proj_pct_s = f"  (+{proj_pct:.2f}%)" if proj_pct is not None and show_pct else ""
             self._value_labels["projexp"].configure(text=f"+{proj:,}{proj_pct_s}")
         else:
             self._value_labels["projexp"].configure(text="--")
 
-        hp_loss, mp_loss = self._session.hp_loss, self._session.mp_loss
-        self._value_labels["hploss"].configure(
-            text=_fmt_loss(hp_loss), text_color=HP_COLOR if hp_loss > 0 else INK_FAINT
-        )
-        self._value_labels["mploss"].configure(
-            text=_fmt_loss(mp_loss), text_color=MP_COLOR if mp_loss > 0 else INK_FAINT
-        )
+        for key, loss, color in (("hploss", session.hp_loss, HP_COLOR), ("mploss", session.mp_loss, MP_COLOR)):
+            self._value_labels[key].configure(text=_fmt_loss(loss), text_color=color if loss > 0 else INK_FAINT)
 
-        # Pause/stop/calibration are user- or engine-driven states that take
-        # priority over the activity-based idle/tracking read below -- e.g. a
-        # paused session with real HP/MP/EXP movement in its history isn't
-        # "Idle", it's "Paused".
-        if self._run_state == "paused":
+    def _render_status(self) -> None:
+        """The status pill. Most specific state wins."""
+        if self._unreadable_ticks >= UNREADABLE_TICKS:
+            # Whatever the session is doing, the numbers on screen are stale.
+            self._set_status_error(self._t("status_error_unreadable"))
+        elif self._run_state == "paused":
             self._status_pill.configure(text=self._t("status_paused"), fg_color=SURFACE_2, text_color=EXP_COLOR)
         elif self._run_state == "stopped":
             self._status_pill.configure(text=self._t("status_stopped"), fg_color=SURFACE_2, text_color=INK_DIM)
         elif self._session.is_calibrating:
             self._status_pill.configure(text=self._t("status_calibrating"), fg_color=SURFACE_2, text_color=EXP_COLOR)
+        elif self._session.hp_loss == 0 and self._session.mp_loss == 0 and not self._session.exp_diff:
+            # Idle only if none of HP/MP/EXP has moved this session.
+            self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
         else:
-            # Idle only if NONE of HP/MP/EXP have changed recently within this
-            # session -- any one of them moving counts as activity, not idle.
-            idle = hp_loss == 0 and mp_loss == 0 and (exp_diff or 0) == 0
-            if idle:
-                self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
-            else:
-                self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
-
-        # Last, so it wins over every state above: whatever the session is
-        # doing, the numbers on screen are stale and the user should know.
-        if self._unreadable_ticks >= UNREADABLE_TICKS:
-            self._set_status_error(self._t("status_error_unreadable"))
+            self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
 
     def run(self) -> None:
         self.root.mainloop()

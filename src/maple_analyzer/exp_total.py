@@ -23,7 +23,7 @@ interval (pct is only known to 2 decimals); the total is taken as the point
 that the most *distinct* readings agree on.
 
 Two properties that matter, both learned the hard way elsewhere in this app
-(see rate.py's _LossTracker and Session docstrings):
+(see loss.py's LossTracker and Session docstrings):
 
 - Repetition is not corroboration. A covered panel or an idle character
   repeats the identical text every tick, so support is counted over distinct
