@@ -122,10 +122,18 @@ identically whether started via the .exe or this command.
 
 ## Troubleshooting
 
-- **All fields show `--` / blank.** The game window isn't focused. This is a
-  hard constraint, not a bug: the game itself dims its rendering when it
-  loses focus, and that starves the OCR of readable text. Click back into
-  the game window.
+- **Status pill says "Can't read the game bar", or all fields show `--`.**
+  The game window isn't focused (or is on a loading screen). This is a hard
+  constraint, not a bug: the game itself dims its rendering when it loses
+  focus, and that starves the OCR of readable text. After about 3 seconds
+  with nothing readable the status pill says so; the numbers still on screen
+  are the last ones read. Click back into the game window.
+- **The EXP row sometimes holds still for a few seconds.** About one EXP
+  read in six is misread by OCR (a dropped or swapped digit). Each read is
+  checked against the level's total EXP, worked out from many reads; one
+  that doesn't fit is skipped and the last good value stays up until the
+  next good read. This keeps the EXP percentages and the level-up ETA from
+  being thrown off by a single bad read.
 - **Status pill says "Game window not found."** The HUD looks for a window
   titled `新楓之谷` by default. If your client's window title is different,
   this won't match it.
