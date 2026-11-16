@@ -53,6 +53,12 @@ class SessionSummary:
     # a session spans one, since the game's counter resets to ~0. None only for
     # summaries built before this existed, which fall back to the subtraction.
     exp_gained: int | None = None
+    # That gain as a percentage of a level, added up level by level -- 60% of
+    # one level plus 5% of the next is 65, whichever level the session ended
+    # in. None for summaries built before this existed, and when no level
+    # total was ever known; exp_pct_diff then falls back to dividing by
+    # total_exp, which is only right for a session that stayed in one level.
+    exp_pct_gained: float | None = None
     # User-assigned label, e.g. "grinding spot A". None until renamed via the
     # History tab -- UI-layer concern only, the engine never sets this.
     name: str | None = None
@@ -67,6 +73,8 @@ class SessionSummary:
 
     @property
     def exp_pct_diff(self) -> float | None:
+        if self.exp_pct_gained is not None:
+            return self.exp_pct_gained
         diff = self.exp_diff
         if diff is None or not self.total_exp:
             return None
@@ -343,6 +351,7 @@ class Session:
         # EXP is measured per *level segment* -- see _record_exp for why it is
         # deliberately not a tick-by-tick accumulator.
         self._banked = 0                      # gain from levels completed this session
+        self._banked_pct = 0.0                # ...and the same as a percentage of those levels
         self._segment_start: int | None = None  # EXP at the start of the current level
         self._last_exp: int | None = None
         self._last_level: int | None = None
@@ -418,6 +427,7 @@ class Session:
         self._mp.reset(self._mp_cur)
         self._total_exp = None  # re-derived fresh -- could differ after a level-up
         self._banked = 0
+        self._banked_pct = 0.0
         self._segment_start = self._exp_cur
         self._last_exp = self._exp_cur
         self._baseline_pending = (
@@ -800,7 +810,9 @@ class Session:
             # Requiring *both* a level increase and an EXP reset keeps a
             # one-off level misread from banking a phantom segment.
             if previous_total:
-                self._banked += max(0, int(previous_total - self._segment_start))
+                finished = max(0, int(previous_total - self._segment_start))
+                self._banked += finished
+                self._banked_pct += finished / previous_total * 100
             # Without a percentage reading the finished level's total is
             # unknown, so its remainder is dropped rather than invented: an
             # under-count, never a fabricated number.
@@ -842,6 +854,21 @@ class Session:
         return max(0, self._banked + (self._exp_cur - self._segment_start))
 
     @property
+    def exp_pct_gained(self) -> float | None:
+        """exp_diff as a percentage of a level, added up level by level: the
+        share of each finished level that this session covered, plus the
+        share of the current one. Dividing the whole gain by the current
+        level's total -- what the HUD and History did before -- is only right
+        until the first level-up; after it, a session that finished the last
+        40% of one level and 5% of the next showed neither 45 nor anything
+        else meaningful. None until the current level's total is known."""
+        diff = self.exp_diff
+        total = self.total_exp
+        if diff is None or not total:
+            return None
+        return self._banked_pct + max(0, diff - self._banked) / total * 100
+
+    @property
     def hp_loss(self) -> int:
         return self._hp.loss
 
@@ -880,4 +907,5 @@ class Session:
             total_exp=self.total_exp,
             interval_minutes=interval_minutes,
             exp_gained=self.exp_diff,
+            exp_pct_gained=self.exp_pct_gained,
         )

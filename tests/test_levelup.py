@@ -12,6 +12,8 @@ dropping with the level unchanged is noise and must not be counted.
 """
 from __future__ import annotations
 
+import pytest
+
 from captured_levelup_frames import LEVELUP_FRAMES
 from maple_analyzer.parser import StatSnapshot, parse_fields
 from maple_analyzer.rate import Session
@@ -203,3 +205,18 @@ def test_garbage_cannot_accumulate_over_many_ticks():
         _record(s, exp=99_999_999, pct=None, level=45)
         _record(s, exp=1000, pct=1.0, level=45)
     assert s.exp_diff == 0
+
+
+def test_gained_percentage_adds_up_level_by_level():
+    """The last 40% of one level plus the first 5% of the next is 45% of a
+    level. Dividing the whole gain by the new level's total -- what the HUD
+    and History did -- gave (400 + 100) / 2000 = 25%."""
+    s = Session(require_calibration=False)
+    for cur in (600, 700, 800, 900):
+        s.record(cur, 100, 100, cur / 10, level=10)       # level 10 needs 1,000
+    for cur in (20, 60, 100):
+        s.record(cur, 100, 100, cur / 20, level=11)       # level 11 needs 2,000
+    assert s.exp_diff == 400 + 100
+    assert s.exp_pct_gained == pytest.approx(45.0)
+    summary = s.finalize(10)
+    assert summary.exp_pct_diff == pytest.approx(45.0)

@@ -103,6 +103,9 @@ class _StubApp:
         self._run_state = "stopped"
         self._last_capture_error: str | None = None
         self._last_client_size = None
+        self._save_crops_dir = None
+        self._saved_crops = 0
+        self._unreadable_ticks = 0
         self.root = _StubRoot()
 
         self._status_pill = _StubWidget()
@@ -130,6 +133,7 @@ class _StubApp:
     _log = staticmethod(OverlayApp._log)
     _modal = OverlayApp._modal
     _do_tick = OverlayApp._do_tick
+    _save_crops = OverlayApp._save_crops
     _render = OverlayApp._render
     _update_timer_label = OverlayApp._update_timer_label
     _maybe_finalize_on_timeout = OverlayApp._maybe_finalize_on_timeout
@@ -364,6 +368,50 @@ def test_a_misread_exp_tick_keeps_the_last_good_row_and_percentages():
     app._do_tick()
     assert app._value_labels["exp"].cget("text") == good_row
     assert app._value_labels["expdiff"].cget("text") == good_gain
+
+
+def test_status_says_so_when_nothing_on_the_bar_can_be_read():
+    """Capture succeeds but every field is blank -- the game dimmed because it
+    lost focus, or sitting on a loading screen. The HUD used to keep its last
+    numbers under a normal status; a live capture ended with nine minutes of
+    this and nothing on screen to show for it."""
+    app = _StubApp()
+    app._on_pause_button_clicked()
+    _calibrate(app)
+    normal = app._status_pill.cget("text")
+    real = app._source.grab_fields
+    app._source.grab_fields = lambda: {"LV": "", "HP": "", "MP": "", "EXP": ""}
+    for _ in range(overlay_module.UNREADABLE_TICKS - 1):
+        app._do_tick()
+    assert app._status_pill.cget("text") == normal  # a few blank ticks are routine
+    app._do_tick()
+    assert app._status_pill.cget("text") == app._t("status_error_unreadable")
+    assert app._value_labels["hp"].cget("text") == "800/824"  # last values stay up
+    app._source.grab_fields = real
+    app._do_tick()
+    assert app._status_pill.cget("text") == normal
+
+
+class _FakeCrop(str):
+    """_StubSource hands back text where the real source hands back images;
+    this is that text with the one image method _save_crops calls."""
+
+    def save(self, path):
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(self)
+
+
+def test_save_crops_writes_the_image_behind_each_rejected_reading(tmp_path):
+    app = _StubApp()
+    app._save_crops_dir = tmp_path / "crops"
+    app._do_tick()
+    assert not (tmp_path / "crops").exists()  # nothing rejected, nothing written
+    real = app._source.grab_fields
+    app._source.grab_fields = lambda: {k: _FakeCrop(v) for k, v in {**real(), "MP": "MP [7200/2816]"}.items()}
+    app._do_tick()
+    written = sorted(p.name for p in (tmp_path / "crops").iterdir())
+    assert len(written) == 2 and written[0].endswith("-MP.png") and written[1] == "index.txt"
+    assert "MP [7200/2816]" in (tmp_path / "crops" / "index.txt").read_text(encoding="utf-8")
 
 
 # --- timer/auto-finalize survive a blocked capture window -----------------

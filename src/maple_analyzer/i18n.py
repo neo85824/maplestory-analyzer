@@ -34,6 +34,10 @@ _STRINGS: dict[str, dict[Lang, str]] = {
     "status_error_minimized": {"en": "Game window minimized", "zh": "遊戲視窗已最小化"},
     "status_error_not_found": {"en": "Game window not found", "zh": "找不到遊戲視窗"},
     "status_error_obscured": {"en": "Stat panel is covered", "zh": "狀態列被其他視窗遮擋"},
+    # Capture works but nothing on the bar can be read: the game is dimmed
+    # (not the focused window), on a loading/login screen, or closed behind a
+    # window that still matches. Not an exception -- see overlay._do_tick.
+    "status_error_unreadable": {"en": "Can't read the game bar", "zh": "讀不到遊戲數值"},
     # Fallback for anything NOT recognized above -- an actual bug, not a
     # known game-window state, so {detail} (the raw exception text) stays in
     # English rather than pretending to translate arbitrary Python errors.

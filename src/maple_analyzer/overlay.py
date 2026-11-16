@@ -98,6 +98,11 @@ if sys.platform == "win32":
         pass
 
 TARGET_MS = 500  # target full tick cycle -- 2Hz, per user request
+# Consecutive ticks with no HP, MP or EXP readable before the status pill
+# says so (3s). A single blank tick is routine -- a skill effect over the bar.
+UNREADABLE_TICKS = 6
+# Most field crops a debug run will write (see OverlayApp._save_crops).
+MAX_SAVED_CROPS = 2000
 SCALE_STEP_PCT = 10
 SCALE_MIN_PCT = 50
 SCALE_MAX_PCT = 150
@@ -181,8 +186,13 @@ def _fmt_summary(s: SessionSummary, index: int) -> str:
 
 
 class OverlayApp:
-    def __init__(self, source: PanelSource):
+    def __init__(self, source: PanelSource, save_crops_dir: str | os.PathLike | None = None):
+        """save_crops_dir: debug aid -- when set, the field images behind
+        every rejected reading are written there, see _save_crops."""
         self._source = source
+        self._save_crops_dir = save_crops_dir
+        self._saved_crops = 0
+        self._unreadable_ticks = 0
         self._ocr = StatPanelOcr()
         self._session = Session()
         self._session_history: list[SessionSummary] = []
@@ -741,10 +751,24 @@ class OverlayApp:
         # drawn on the HUD as 7200/3360 with a full bar. Session already
         # refuses those (rate.py's _LossTracker); blanking them here first
         # makes the HUD hold the last real value too.
+        rejected: list[str] = []
         if snap.hp_cur is not None and snap.hp_max is not None and snap.hp_cur > snap.hp_max:
             snap.hp_cur = snap.hp_max = None
+            rejected.append("HP")
         if snap.mp_cur is not None and snap.mp_max is not None and snap.mp_cur > snap.mp_max:
             snap.mp_cur = snap.mp_max = None
+            rejected.append("MP")
+
+        # Capture succeeded but nothing on the bar could be read. Until this
+        # check existed the HUD just kept its last numbers under a normal
+        # "Tracking"/"Idle" status -- one live capture ended with nine minutes
+        # of blank reads and nothing on screen to say so.
+        if snap.hp_cur is None and snap.mp_cur is None and snap.exp_cur is None:
+            self._unreadable_ticks += 1
+            if self._unreadable_ticks == UNREADABLE_TICKS:
+                self._log(f"[{time.strftime('%H:%M:%S')}] nothing readable for {UNREADABLE_TICKS} ticks")
+        else:
+            self._unreadable_ticks = 0
         merged = StatSnapshot(*(
             new if new is not None else old
             for new, old in zip(vars(snap).values(), vars(self._last).values())
@@ -799,6 +823,9 @@ class OverlayApp:
                 f"~{total:,.0f}; showing {merged.exp_cur}" if total else
                 f"          EXP reading rejected: {exp_cur} [{exp_pct}%]; showing {merged.exp_cur}"
             )
+            rejected.append("EXP")
+        if rejected and self._save_crops_dir is not None:
+            self._save_crops(rejected, field_images, field_text)
         self._last = merged
 
         self._maybe_finalize_on_timeout()
@@ -806,6 +833,27 @@ class OverlayApp:
         self._render(merged)
         elapsed_ms = (time.perf_counter() - t0) * 1000
         return max(0, int(TARGET_MS - elapsed_ms))
+
+    def _save_crops(self, fields: list[str], images: dict, texts: dict[str, str]) -> None:
+        """Debug aid, off unless a directory was given at construction.
+
+        Writes the exact image OCR was shown for each rejected field, plus a
+        line in index.txt with what it read. Misreads are the root cause of
+        most of what rate.py and exp_total.py defend against, and the OCR
+        preprocessing cannot be tuned without real examples of them -- until
+        this existed the only game image on disk was the one sample
+        screenshot. Capped, and never allowed to disturb the tick loop."""
+        with contextlib.suppress(Exception):
+            os.makedirs(self._save_crops_dir, exist_ok=True)
+            stamp = time.strftime("%Y%m%d-%H%M%S")
+            with open(os.path.join(self._save_crops_dir, "index.txt"), "a", encoding="utf-8") as index:
+                for field in fields:
+                    if self._saved_crops >= MAX_SAVED_CROPS:
+                        return
+                    self._saved_crops += 1
+                    name = f"{stamp}-{self._saved_crops:04d}-{field}.png"
+                    images[field].save(os.path.join(self._save_crops_dir, name))
+                    index.write(f"{name}\t{texts.get(field, '')!r}\n")
 
     def _update_timer_label(self) -> None:
         """Split out of _render so the capture-error path in _do_tick can
@@ -1177,8 +1225,11 @@ class OverlayApp:
             snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
         )
 
+        # As a percentage the gain is added up level by level (see
+        # Session.exp_pct_gained), not divided by the current level's total.
+        pct_gained = self._session.exp_pct_gained
         if exp_diff is not None:
-            pct_s = f"  (+{exp_diff / total_exp * 100:.2f}%)" if total_exp and self._settings.show_exp_pct else ""
+            pct_s = f"  (+{pct_gained:.2f}%)" if pct_gained is not None and self._settings.show_exp_pct else ""
             self._value_labels["expdiff"].configure(text=f"+{exp_diff:,}{pct_s}")
         else:
             self._value_labels["expdiff"].configure(text="--")
@@ -1201,7 +1252,10 @@ class OverlayApp:
         # for the same reason).
         proj = self._session.projected_exp(self._settings.window_min * 60)
         if proj is not None:
-            proj_pct_s = f"  (+{proj / total_exp * 100:.2f}%)" if total_exp and self._settings.show_exp_pct else ""
+            # Same scale as the gain so far: the projection is that gain
+            # stretched over the whole window, in EXP and in percent alike.
+            proj_pct = pct_gained * proj / exp_diff if pct_gained is not None and exp_diff else None
+            proj_pct_s = f"  (+{proj_pct:.2f}%)" if proj_pct is not None and self._settings.show_exp_pct else ""
             self._value_labels["projexp"].configure(text=f"+{proj:,}{proj_pct_s}")
         else:
             self._value_labels["projexp"].configure(text="--")
@@ -1232,6 +1286,11 @@ class OverlayApp:
                 self._status_pill.configure(text=self._t("status_idle"), fg_color=SURFACE_2, text_color=INK_DIM)
             else:
                 self._status_pill.configure(text=self._t("status_tracking"), fg_color=TRACK_BG, text_color=OK_COLOR)
+
+        # Last, so it wins over every state above: whatever the session is
+        # doing, the numbers on screen are stale and the user should know.
+        if self._unreadable_ticks >= UNREADABLE_TICKS:
+            self._set_status_error(self._t("status_error_unreadable"))
 
     def run(self) -> None:
         self.root.mainloop()
