@@ -67,28 +67,137 @@ footer { margin-top: 56px; font-size: 0.82rem; color: var(--ink-faint); }
 
 <div class="page">
 <header>
-  <div class="eyebrow">Internals &middot; as of 2026-11-17</div>
+  <div class="eyebrow">Internals &middot; v1.0.6</div>
   <h1>How MapleStoryAnalyzer works</h1>
-  <p class="lede">A small always-on-top window that reads your level, HP, MP and EXP off the MapleStory screen twice a second and tells you how much EXP you gained and how much HP and MP you spent. It never touches the game's memory or files. It looks at pixels and reads them with OCR.</p>
-  <p>Reading numbers off a screen is unreliable, and most of this program exists to cope with that. This page follows one reading from the screen to the window, then explains how the program decides which readings to believe.</p>
+  <p class="lede">MapleStoryAnalyzer is a small window that stays on top of the game. Two times each second it reads your level, HP, MP and EXP from the screen. It shows how much EXP you got and how much HP and MP you used.</p>
+  <p>The program does not read the game memory or the game files. It takes a picture of the screen and reads the text with OCR. OCR makes mistakes, so a large part of the program decides which readings are correct.</p>
   <nav class="toc" aria-label="Sections">
+    <a href="#ui">The window</a>
+    <a href="#behaviour">Behaviours</a>
     <a href="#pipeline">The pipeline</a>
     <a href="#steps">Each step</a>
-    <a href="#trust">Which readings to trust</a>
+    <a href="#trust">Which readings are correct</a>
     <a href="#session">Sessions</a>
-    <a href="#hud">What the window shows</a>
     <a href="#files">File map</a>
-    <a href="#verify">Testing and debugging</a>
-    <a href="#limits">Known limits</a>
+    <a href="#verify">Tests and debug</a>
+    <a href="#limits">Limits</a>
   </nav>
 </header>
 
-<h2 id="pipeline">The pipeline</h2>
-<p>Every 500&nbsp;ms the program runs one cycle, called a tick. A tick is five steps, each in its own file, each handing one thing to the next.</p>
+<h2 id="ui">The window</h2>
+<p>The window has three tabs: Live, History and Settings. The Live tab is the main view.</p>
 
 <figure>
   <div class="scroll">
-  <svg viewBox="0 0 860 250" role="img" aria-label="One tick: the screen is captured into four field images, OCR turns them into four strings, the parser turns those into numbers, the session decides what to count, and the window is redrawn.">
+  <svg viewBox="0 0 860 452" role="img" aria-label="The Live tab: a status label and a timer at the top, then the LV, HP, MP and EXP rows, then six session rows, then the Pause, Restart and Stop buttons.">
+    <g font-size="12">
+      <rect x="30" y="14" width="300" height="424" rx="12" fill="none" stroke="currentColor" stroke-width="1.4"/>
+      <!-- tabs -->
+      <rect x="44" y="26" width="272" height="26" rx="7" fill="none" stroke="currentColor" opacity=".5"/>
+      <rect x="46" y="28" width="88" height="22" rx="6" fill="currentColor" opacity=".14"/>
+      <g text-anchor="middle" font-weight="600"><text x="90" y="43">Live</text><text x="180" y="43" opacity=".6">History</text><text x="270" y="43" opacity=".6">Settings</text></g>
+      <!-- status + timer -->
+      <rect x="44" y="64" width="82" height="22" rx="11" fill="#2fa866" opacity=".2"/>
+      <text x="85" y="79" text-anchor="middle" font-weight="600">Tracking</text>
+      <rect x="236" y="64" width="80" height="22" rx="11" fill="none" stroke="currentColor" opacity=".6"/>
+      <text x="276" y="79" text-anchor="middle" font-weight="600">4:12 left</text>
+      <!-- stats card -->
+      <rect x="44" y="98" width="272" height="116" rx="10" fill="none" stroke="currentColor" opacity=".5"/>
+      <g font-weight="600">
+        <text x="56" y="120" fill="#c98a00">LV</text><text x="56" y="146" fill="#d9534a">HP</text><text x="56" y="172" fill="#3f7fe0">MP</text><text x="56" y="198" fill="#c98a00">EXP</text>
+      </g>
+      <g font-family="monospace" text-anchor="end">
+        <text x="306" y="120">52</text><text x="306" y="146">621/936</text><text x="306" y="172">943/3360</text><text x="306" y="198">98,700 (12.50%)</text>
+      </g>
+      <g>
+        <rect x="88" y="139" width="90" height="5" rx="2.5" fill="currentColor" opacity=".15"/><rect x="88" y="139" width="60" height="5" rx="2.5" fill="#d9534a"/>
+        <rect x="88" y="165" width="90" height="5" rx="2.5" fill="currentColor" opacity=".15"/><rect x="88" y="165" width="25" height="5" rx="2.5" fill="#3f7fe0"/>
+        <rect x="88" y="191" width="60" height="5" rx="2.5" fill="currentColor" opacity=".15"/><rect x="88" y="191" width="8" height="5" rx="2.5" fill="#c98a00"/>
+      </g>
+      <!-- session card -->
+      <rect x="44" y="226" width="272" height="160" rx="10" fill="none" stroke="currentColor" opacity=".5"/>
+      <g opacity=".75">
+        <text x="56" y="248">Start EXP</text><text x="56" y="272">EXP diff</text><text x="56" y="296">Level-up ETA</text>
+        <text x="56" y="320">Est. session EXP</text><text x="56" y="344">HP loss</text><text x="56" y="368">MP loss</text>
+      </g>
+      <g font-family="monospace" text-anchor="end">
+        <text x="306" y="248">95,100</text><text x="306" y="272">+3,600 (+0.46%)</text><text x="306" y="296">18h33m</text>
+        <text x="306" y="320">+6,207 (+0.79%)</text><text x="306" y="344" fill="#d9534a">-2910</text><text x="306" y="368" fill="#3f7fe0">-1870</text>
+      </g>
+      <!-- buttons -->
+      <g text-anchor="middle" font-weight="600">
+        <rect x="44" y="398" width="86" height="28" rx="8" fill="none" stroke="currentColor"/><text x="87" y="416">Pause</text>
+        <rect x="137" y="398" width="86" height="28" rx="8" fill="currentColor" opacity=".14"/><rect x="137" y="398" width="86" height="28" rx="8" fill="none" stroke="currentColor"/><text x="180" y="416">Restart</text>
+        <rect x="230" y="398" width="86" height="28" rx="8" fill="none" stroke="currentColor"/><text x="273" y="416" fill="#d9534a">Stop</text>
+      </g>
+      <!-- callouts -->
+      <g stroke="currentColor" stroke-width="1" opacity=".55" fill="none">
+        <line x1="332" y1="75" x2="376" y2="75"/>
+        <line x1="332" y1="156" x2="376" y2="156"/>
+        <line x1="332" y1="306" x2="376" y2="306"/>
+        <line x1="332" y1="412" x2="376" y2="412"/>
+      </g>
+      <g font-size="13">
+        <text x="384" y="64" font-weight="600">Status and timer</text>
+        <text x="384" y="82">The status shows what the program does now.</text>
+        <text x="384" y="99">The timer shows the time left in the session.</text>
+        <text x="384" y="145" font-weight="600">Live values</text>
+        <text x="384" y="163">The values that the program reads from the game.</text>
+        <text x="384" y="180">They update in all states, also when you stop.</text>
+        <text x="384" y="295" font-weight="600">Session values</text>
+        <text x="384" y="313">Totals since the session started.</text>
+        <text x="384" y="330">They change only while the state is Running.</text>
+        <text x="384" y="401" font-weight="600">Buttons</text>
+        <text x="384" y="419">When the state is Stopped, there is only Start.</text>
+      </g>
+    </g>
+  </svg>
+  </div>
+  <figcaption>The Live tab with example values. The top half shows what the game shows now. The bottom half shows the totals for the current session.</figcaption>
+</figure>
+
+<div class="table scroll"><table>
+  <tr><th>Row</th><th>Meaning</th><th>How the program gets it</th></tr>
+  <tr><td>LV, HP, MP</td><td>Values in the game now.</td><td>The last reading. If a reading is empty or not possible, the last good value stays.</td></tr>
+  <tr><td>EXP</td><td>EXP in the current level, and the percent.</td><td>The last reading that agrees with the level total.</td></tr>
+  <tr><td>Start EXP</td><td>EXP when the session started.</td><td>Set after calibration.</td></tr>
+  <tr><td>EXP diff</td><td>EXP that you got in this session.</td><td>Current EXP minus start EXP, for each level. The percent is the sum for each level.</td></tr>
+  <tr><td>Level-up ETA</td><td>Time until the next level.</td><td>EXP that remains, divided by the EXP rate of the session. Shown after 3 seconds.</td></tr>
+  <tr><td>Est. session EXP</td><td>EXP you get if the rate stays the same until the timer ends.</td><td>EXP diff &divide; elapsed time &times; session length.</td></tr>
+  <tr><td>HP loss, MP loss</td><td>HP and MP that you used.</td><td>The sum of all decreases between ticks.</td></tr>
+</table></div>
+
+<p><strong>History tab.</strong> Each completed session is a card. A card shows the duration, the start and end EXP, the EXP diff, the HP loss and the MP loss. You can rename or delete a card.</p>
+<p><strong>Settings tab.</strong> Window scale, always on top, language (Chinese or English), session length (1 to 60 minutes), which rows to show, auto-stop, and save on restart.</p>
+
+<h2 id="behaviour">Behaviours</h2>
+<p>This table shows what the program does in each situation.</p>
+<div class="table scroll"><table>
+  <tr><th>Situation</th><th>What the program does</th></tr>
+  <tr><td>You open the program.</td><td>The state is Stopped. The program shows live values but counts nothing.</td></tr>
+  <tr><td>You press Start.</td><td>The program calibrates for 2 or 3 ticks. The status shows "Calibrating". Then it starts to count.</td></tr>
+  <tr><td>You press Pause.</td><td>The timer stops. The program counts nothing. Live values continue to update.</td></tr>
+  <tr><td>You press Resume.</td><td>The timer continues. Changes during the pause are not counted.</td></tr>
+  <tr><td>You press Restart.</td><td>The program saves the session to History and starts a new session. You can turn off the save in Settings.</td></tr>
+  <tr><td>You press Stop.</td><td>The program saves the session to History. The state becomes Stopped.</td></tr>
+  <tr><td>The timer gets to zero.</td><td>The program saves the session to History and stops. If auto-stop is off, a new session starts immediately.</td></tr>
+  <tr><td>The game window is closed, minimized, or another window covers the stat bar.</td><td>The status shows the cause. The program tries again every 2 seconds. The timer continues.</td></tr>
+  <tr><td>The program cannot read HP, MP and EXP for 3 seconds.</td><td>The status shows "Can't read the game bar". The last values stay on the window. The usual cause: the game is not the active window.</td></tr>
+  <tr><td>One value is not readable in one tick.</td><td>The last good value stays. The window does not show "--".</td></tr>
+  <tr><td>An EXP reading does not agree with the level total.</td><td>The program ignores the reading. The EXP row keeps the last good value.</td></tr>
+  <tr><td>HP or MP is larger than its maximum.</td><td>The program ignores the reading.</td></tr>
+  <tr><td>HP or MP changes by more than half of the maximum in one tick.</td><td>The program waits for one more reading. If the next reading agrees, it counts the change.</td></tr>
+  <tr><td>You level up.</td><td>The program adds the EXP that remained in the old level. Then it counts from zero in the new level.</td></tr>
+  <tr><td>You level up during a pause.</td><td>The program cannot count the EXP of the completed level.</td></tr>
+  <tr><td>You close the program.</td><td>History and settings are lost. The program does not save them to disk.</td></tr>
+</table></div>
+
+<h2 id="pipeline">The pipeline</h2>
+<p>Every 500&nbsp;ms the program does one cycle. One cycle is a <em>tick</em>. A tick has five steps. Each step is in its own file and gives one result to the next step.</p>
+
+<figure>
+  <div class="scroll">
+  <svg viewBox="0 0 860 250" role="img" aria-label="One tick: capture makes four field images from the screen, OCR makes four text strings, the parser makes numbers, the session decides what to count, and the window shows the result.">
     <defs>
       <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
     </defs>
@@ -104,7 +213,7 @@ footer { margin-top: 56px; font-size: 0.82rem; color: var(--ink-faint); }
       <rect x="670" y="60" width="180" height="64" rx="8" fill="none" stroke="#c98a00" stroke-width="2"/>
       <text x="760" y="88">Session</text><text x="760" y="106" font-size="11" font-weight="400" opacity=".7">rate.py, loss.py, exp_total.py</text>
       <rect x="670" y="176" width="180" height="56" rx="8" fill="none" stroke="currentColor"/>
-      <text x="760" y="200">HUD window</text><text x="760" y="218" font-size="11" font-weight="400" opacity=".7">overlay.py</text>
+      <text x="760" y="200">Window</text><text x="760" y="218" font-size="11" font-weight="400" opacity=".7">overlay.py</text>
     </g>
     <g stroke="currentColor" fill="none" stroke-width="1.4">
       <line x1="140" y1="92" x2="188" y2="92" marker-end="url(#arr)"/>
@@ -117,8 +226,8 @@ footer { margin-top: 56px; font-size: 0.82rem; color: var(--ink-faint); }
       <text x="164" y="46">pixels</text>
       <text x="325" y="38">4 small</text><text x="325" y="51">images</text>
       <text x="485" y="38">4 text</text><text x="485" y="51">strings</text>
-      <text x="645" y="38">numbers</text><text x="645" y="51">or blanks</text>
-      <text x="770" y="153" text-anchor="start">trusted values, gain, loss</text>
+      <text x="645" y="38">numbers</text><text x="645" y="51">or empty</text>
+      <text x="770" y="153" text-anchor="start">good values, EXP diff, loss</text>
     </g>
     <g font-size="11" font-family="monospace" opacity=".85">
       <text x="190" y="150">LV | HP | MP | EXP</text>
@@ -127,82 +236,82 @@ footer { margin-top: 56px; font-size: 0.82rem; color: var(--ink-faint); }
     </g>
   </svg>
   </div>
-  <figcaption>One tick. The first four steps only read; the Session (amber) is the only place that decides what a reading means and whether to count it.</figcaption>
+  <figcaption>One tick. The first four steps only read. The Session step (amber) decides if a reading is correct and if the program counts it.</figcaption>
 </figure>
 
-<p>The whole loop is driven by <code>OverlayApp._do_tick</code> in <code>overlay.py</code>. Each tick schedules the next one at 500&nbsp;ms minus the time it just spent, so the real rate stays close to two per second. A tick costs about 65&nbsp;ms, nearly all of it OCR.</p>
+<p>The function <code>OverlayApp._do_tick</code> in <code>overlay.py</code> runs the tick. One tick uses approximately 65&nbsp;ms. OCR uses most of this time.</p>
 
 <h2 id="steps">Each step</h2>
 
 <h3>1. Where to look <span class="file">regions.py</span></h3>
-<p>The game's bottom bar has a fixed pixel size. The level badge is pinned to the left edge of the window; HP, MP and EXP are pinned to the right edge. So each field's box is a fixed number of pixels from an edge, not a fraction of the window.</p>
+<p>The stat bar at the bottom of the game has a fixed size in pixels. The level is at the left edge of the window. HP, MP and EXP are at a fixed distance from the right edge. Thus each field has a box that is a fixed number of pixels from an edge.</p>
 <div class="table scroll"><table>
-  <tr><th>Field</th><th>Horizontal</th><th>Vertical (up from bottom)</th></tr>
+  <tr><th>Field</th><th>Horizontal position</th><th>Vertical position (from the bottom)</th></tr>
   <tr><td>LV</td><td class="mono">8 to 92 from the left</td><td class="mono">36 to 6</td></tr>
   <tr><td>HP</td><td class="mono">902 to 804 from the right</td><td class="mono">35 to 9</td></tr>
   <tr><td>MP</td><td class="mono">738 to 640 from the right</td><td class="mono">35 to 9</td></tr>
   <tr><td>EXP</td><td class="mono">572 to 436 from the right</td><td class="mono">35 to 9</td></tr>
 </table></div>
-<p>The 26-pixel height is deliberate. Two pixels shorter clips the tops of digits and OCR starts reading 7 as 2. Any taller and the coloured bar underneath bleeds in. These numbers were measured on one real screenshot at 1366&times;768, the only resolution that has been verified.</p>
+<p>The height of 26 pixels is important. A smaller box cuts the top of the digits, and OCR reads 7 as 2. A larger box includes the coloured bar below the text. These values come from one real screenshot at 1366&times;768.</p>
 
 <h3>2. Capture <span class="file">capture.py</span></h3>
 <p><code>GameWindowCapture.grab_fields()</code> does three things:</p>
 <ol>
-  <li><strong>Finds the game window</strong> by title and by owning process. Title alone is not enough: a browser tab about the game can carry the same title.</li>
-  <li><strong>Checks nothing is covering the bar.</strong> The screen grab takes whatever is on screen at that spot, so a chat window resting on the bar would be read as if it were the game. Four corner points of every field are tested; if any belongs to another window the tick is refused with "stat panel is obscured".</li>
-  <li><strong>Grabs the bar once</strong> and slices the four field images out of it in memory.</li>
+  <li><strong>It finds the game window.</strong> It uses the window title and the process name. The title alone is not sufficient, because a browser tab can have the same title.</li>
+  <li><strong>It makes sure that no window covers the stat bar.</strong> The capture takes the pixels that are on the screen. If a chat window is on top of the stat bar, the program would read the chat window. The program tests four points of each field. If one point is in a different window, the tick stops.</li>
+  <li><strong>It captures the stat bar one time</strong> and cuts the four field images from it.</li>
 </ol>
-<p>If the window is missing, minimized or covered, the tick stops here. The status pill says why and the program retries every 2 seconds. The session timer keeps running, because it measures real time.</p>
 
 <h3>3. OCR <span class="file">ocr.py</span></h3>
-<p>Each field image goes through RapidOCR in recognition-only mode. Finding where text is on screen was 600&nbsp;ms per tick and unnecessary, since the boxes are already known; reading a known box is about 15&nbsp;ms.</p>
-<p>The game font is about 14 pixels tall, smaller than the OCR model likes, so each image is prepared first:</p>
+<p>OCR reads the text in each field image. The program uses RapidOCR in "recognition only" mode. This mode reads a box that is already known, and it uses approximately 15&nbsp;ms for each field.</p>
+<p>The game font is small (approximately 14 pixels). The program prepares each image before OCR:</p>
 <ul>
-  <li><strong>Greyscale</strong>, which removes the green tint of the text and the colour of the bar at the edges.</li>
-  <li><strong>3&times; upscale.</strong> Without it thin characters vanish, most importantly the <code>[</code> in the EXP field.</li>
-  <li><strong>LV only: hard black-and-white threshold.</strong> White digits on an orange tile have too little contrast in grey (51 was read as 50). The same threshold erases <code>[</code> and <code>/</code>, so the other fields do not get it.</li>
+  <li><strong>Greyscale.</strong> This removes the green colour of the text and the colour of the bar.</li>
+  <li><strong>3&times; larger.</strong> Without this, OCR does not see thin characters such as the <code>[</code> in the EXP field.</li>
+  <li><strong>LV only: black and white.</strong> The level is white text on orange. In greyscale, OCR read 51 as 50. Other fields do not use this, because it removes <code>[</code> and <code>/</code>.</li>
 </ul>
 
 <h3>4. Parser <span class="file">parser.py</span></h3>
-<p>Four strings in, one <code>StatSnapshot</code> out: level, HP current and max, MP current and max, EXP value and EXP percentage. Any of them can be blank. The rule throughout is that text which does not look right produces a blank, never a guess, because a blank is harmless (the last good value stays on screen) while a wrong number gets counted.</p>
+<p>The parser changes the four text strings into numbers. The result is a <code>StatSnapshot</code>: level, HP and its maximum, MP and its maximum, EXP and its percent. Each value can be empty.</p>
+<p>The rule is: if the text does not have the correct form, the value is empty. An empty value is safe, because the window keeps the last good value. A wrong value is not safe, because the program counts it.</p>
 <div class="table scroll"><table>
-  <tr><th>OCR text</th><th>Parsed as</th><th>Why</th></tr>
-  <tr><td class="mono">EXP 252463[33.72%]</td><td class="mono good">252463, 33.72</td><td>The normal form.</td></tr>
-  <tr><td class="mono">EXP 50355[638%]</td><td class="mono good">50355, 6.38</td><td>The decimal point was lost. The game always shows two decimals.</td></tr>
-  <tr><td class="mono">EXP 96243[12,19%]</td><td class="mono good">96243, 12.19</td><td>The point arrives as a space, colon, comma or dash.</td></tr>
-  <tr><td class="mono">EXP 404715(94 50%]</td><td class="mono good">404715, 94.50</td><td><code>[</code> is often read as <code>(</code>.</td></tr>
-  <tr><td class="mono">EXP 89361[11 2%]</td><td class="mono amber">89361, blank</td><td>One decimal means a digit was lost (really 11.32).</td></tr>
-  <tr><td class="mono">EXP 93044[11 738%]</td><td class="mono amber">93044, blank</td><td>An extra digit. Used to be read as 7.38.</td></tr>
-  <tr><td class="mono">EXP101332182</td><td class="mono bad">blank, blank</td><td>No bracket. This one once booked +101 million EXP.</td></tr>
+  <tr><th>OCR text</th><th>Result</th><th>Reason</th></tr>
+  <tr><td class="mono">EXP 252463[33.72%]</td><td class="mono good">252463, 33.72</td><td>The usual form.</td></tr>
+  <tr><td class="mono">EXP 50355[638%]</td><td class="mono good">50355, 6.38</td><td>The decimal point is missing. The game always shows two decimals.</td></tr>
+  <tr><td class="mono">EXP 96243[12,19%]</td><td class="mono good">96243, 12.19</td><td>OCR reads the point as a space, a colon, a comma or a dash.</td></tr>
+  <tr><td class="mono">EXP 404715(94 50%]</td><td class="mono good">404715, 94.50</td><td>OCR frequently reads <code>[</code> as <code>(</code>.</td></tr>
+  <tr><td class="mono">EXP 89361[11 2%]</td><td class="mono amber">89361, empty</td><td>One decimal: a digit is missing (the real value is 11.32).</td></tr>
+  <tr><td class="mono">EXP 93044[11 738%]</td><td class="mono amber">93044, empty</td><td>One digit too many.</td></tr>
+  <tr><td class="mono">EXP101332182</td><td class="mono bad">empty, empty</td><td>No bracket. This text once added 101 million EXP.</td></tr>
 </table></div>
 
-<h3>5. Tidy up and hand over <span class="file">overlay.py</span></h3>
-<p>Before the numbers reach the session, <code>_do_tick</code> does three small things:</p>
+<h3>5. Before the session <span class="file">overlay.py</span></h3>
+<p><code>_do_tick</code> does three small things before it gives the numbers to the session:</p>
 <ul>
-  <li><strong>Drops impossible pairs.</strong> A current value above its own maximum, such as <code>MP [7200/3360]</code> for 1200, is blanked.</li>
-  <li><strong>Counts unreadable ticks.</strong> If HP, MP and EXP are all blank for 6 ticks (3 seconds), the status pill says the game cannot be read. This happens when the game loses focus and dims.</li>
-  <li><strong>Fills blanks for LV, HP and MP</strong> with the last known value, so a spell effect over the bar does not make the window flicker to "--". EXP is not filled this way; it is handled as a pair, as the next section explains.</li>
+  <li>It removes HP or MP values that are larger than their maximum. Example: <code>MP [7200/3360]</code> when the real value is 1200.</li>
+  <li>It counts the ticks in which HP, MP and EXP are all empty. After 6 ticks (3 seconds) the status changes.</li>
+  <li>For LV, HP and MP, it replaces an empty value with the last known value. EXP is different: see the next section.</li>
 </ul>
 
-<h2 id="trust">Which readings to trust</h2>
-<p>In a 29-minute recording of real play, about one EXP reading in six was wrong even after parsing. A digit goes missing from the value, from the percentage, or from both; or one digit is read as another. HP and MP misread too. Three mechanisms deal with this, and they are different on purpose.</p>
+<h2 id="trust">Which readings are correct</h2>
+<p>In a recording of 29 minutes of real play, approximately one EXP reading in six was wrong. A digit was missing from the value, from the percent, or from both. Or OCR read one digit as a different digit. HP and MP readings are also wrong at times. The program has three methods for this problem.</p>
 
-<h3>EXP: the level total, by agreement <span class="file">exp_total.py</span></h3>
-<p>The game shows EXP as a value and a percentage of the current level. Those two numbers are linked: value divided by percentage is the total EXP the level needs, and that total does not change until you level up. The game never prints it, but every correct reading implies the same one. Misreads imply something else, and they disagree with each other.</p>
+<h3>EXP: the level total <span class="file">exp_total.py</span></h3>
+<p>The game shows EXP as a value and a percent. The value divided by the percent gives the total EXP of the level. This is the <em>level total</em>. It does not change until you level up. The game does not show the level total, but all correct readings give the same level total. Wrong readings give different level totals.</p>
 
 <figure>
   <div class="scroll">
-  <svg viewBox="0 0 860 300" role="img" aria-label="Each EXP reading implies a range for the level total. Correct readings overlap at one value near 789,600; misreads land far away and nowhere near each other.">
+  <svg viewBox="0 0 860 300" role="img" aria-label="Each EXP reading gives a range for the level total. Correct readings give the same value near 789,600. Wrong readings give values far from it and far from each other.">
     <g font-size="11">
       <line x1="40" y1="250" x2="820" y2="250" stroke="currentColor" stroke-width="1.2"/>
       <g text-anchor="middle" opacity=".75">
         <line x1="120" y1="246" x2="120" y2="254" stroke="currentColor"/><text x="120" y="270">80 k</text>
         <line x1="430" y1="246" x2="430" y2="254" stroke="currentColor"/><text x="430" y="270">790 k</text>
         <line x1="740" y1="246" x2="740" y2="254" stroke="currentColor"/><text x="740" y="270">6,500 k</text>
-        <text x="430" y="290" font-size="11">level total implied by each reading (not to scale)</text>
+        <text x="430" y="290" font-size="11">level total that each reading gives (not to scale)</text>
       </g>
       <rect x="418" y="24" width="24" height="226" fill="#2fa866" opacity=".16"/>
-      <text x="446" y="36" font-weight="600">where the most readings agree</text>
+      <text x="446" y="36" font-weight="600">most readings agree here</text>
       <g stroke="#2fa866" stroke-width="5" stroke-linecap="round">
         <line x1="412" y1="60" x2="448" y2="60"/>
         <line x1="420" y1="84" x2="444" y2="84"/>
@@ -226,50 +335,51 @@ footer { margin-top: 56px; font-size: 0.82rem; color: var(--ink-faint); }
         <text x="502" y="222">92489 [11.21%]</text>
       </g>
       <g font-size="11" opacity=".75">
-        <text x="560" y="158">percentage lost a digit</text>
-        <text x="138" y="182">value lost a digit</text>
-        <text x="502" y="206">7 read as 2</text>
+        <text x="560" y="158">a digit is missing from the percent</text>
+        <text x="138" y="182">a digit is missing from the value</text>
+        <text x="502" y="206">OCR read 7 as 2</text>
       </g>
     </g>
   </svg>
   </div>
-  <figcaption>Readings from the recording. Each bar is the range of level totals one reading allows. The four correct ones (green) overlap at about 789,600. The three misreads (red) land elsewhere and nowhere near each other.</figcaption>
+  <figcaption>Readings from the recording. Each line is the range of level totals that one reading permits. The four correct readings (green) agree at approximately 789,600. The three wrong readings (red) do not agree with them or with each other.</figcaption>
 </figure>
 
-<p><code>LevelTotalEstimator</code> keeps the last 80 distinct readings and takes the level total to be the value the most of them agree on. Once it has one, each new reading either agrees with it or is rejected. The rules, and the real case behind each:</p>
+<p><code>LevelTotalEstimator</code> keeps the last 80 different readings. The level total is the value on which most readings agree. After that, the program compares each new reading with the level total. If the reading does not agree, the program ignores it.</p>
 <div class="table scroll"><table>
-  <tr><th>Rule</th><th>What it stops</th></tr>
-  <tr><td>Only <em>distinct</em> readings count. The same text repeated counts once.</td><td>An idle character repeats one misread for minutes. <code>S255[1 12%]</code> was 379 of 429 ticks in one recording.</td></tr>
-  <tr><td>At least 3 readings must agree, and they must span 0.05 of a percent.</td><td>"11.83" read as "1.83" several times in a row gives totals close enough to agree with each other for a moment. They drift apart as EXP moves; true readings do not.</td></tr>
-  <tr><td>A reading lower than the last good one needs 3 distinct readings or 10 ticks before it is believed.</td><td><code>8721[111%]</code> for 87210 [11.04%]: both numbers lost a digit, so the ratio is right. EXP cannot fall within a level.</td></tr>
-  <tr><td>A reading with no percentage is skipped, unless the percentage has been missing for 10 ticks.</td><td><code>930458(7162]</code>, value and percentage fused. One session ended at +823,919 because of these.</td></tr>
-  <tr><td>Level goes up and EXP drops: forget the total and start again.</td><td>A real level-up. Both signals are required so one misread level does not reset everything.</td></tr>
-  <tr><td>If 8 distinct readings in a row disagree and at least 5 of them agree on a new total, switch to it.</td><td>A level-up the level badge failed to show, or a total that was wrong from the start.</td></tr>
+  <tr><th>Rule</th><th>The problem that it prevents</th></tr>
+  <tr><td>Only <em>different</em> readings count. The same text 100 times counts as one.</td><td>A character that does not move repeats the same wrong reading. In one recording, <code>S255[1 12%]</code> was in 379 of 429 ticks.</td></tr>
+  <tr><td>A minimum of 3 readings must agree. They must cover a range of 0.05 percent.</td><td>OCR reads "11.83" as "1.83" many times. For a short time, these wrong readings agree with each other.</td></tr>
+  <tr><td>A reading that is lower than the last good reading must occur in 3 different readings or 10 ticks.</td><td><code>8721[111%]</code> for 87210 [11.04%]. A digit is missing from the two numbers, so the ratio is correct. But EXP cannot decrease in a level.</td></tr>
+  <tr><td>The program ignores a reading without a percent. Exception: the percent is missing for 10 ticks.</td><td><code>930458(7162]</code>: the value and the percent became one number. One session ended at +823,919 because of this.</td></tr>
+  <tr><td>If the level increases and EXP decreases, the program starts a new level total.</td><td>A real level-up. The two signals are necessary, so that one wrong level reading does not reset the level total.</td></tr>
+  <tr><td>If 8 different readings in sequence do not agree, and 5 or more agree on a new total, the program uses the new total.</td><td>A level-up that the level field did not show, or a level total that was wrong from the start.</td></tr>
 </table></div>
-<p>Until a total is established the estimator has no opinion, and an older, looser check is used: a reading is rejected if its implied total differs by more than 25% from the previous tick's.</p>
+<p>Before the level total is known, the program uses a simpler test: it ignores a reading if its level total is more than 25% different from the last tick.</p>
 
-<h3>EXP gained: measured per level, never added up <span class="file">rate.py</span></h3>
-<p>Within a level, EXP gained is simply the current value minus the value at the start. That depends only on the latest trusted reading, so a bad reading that slips through is wrong for one tick and then corrects itself. Adding up every rise was tried once and removed: a single garbage frame added 101 million EXP that never went away.</p>
-<p>A level-up closes one segment and opens another. The finished level contributes its total minus where the segment started; the new level starts counting from zero. As a percentage, the gain is added up level by level, so finishing the last 40% of one level and 5% of the next shows 45%.</p>
+<h3>EXP diff: one measurement for each level <span class="file">rate.py</span></h3>
+<p>In one level, the EXP diff is the current EXP minus the start EXP. This uses only the last good reading. Thus one wrong reading is wrong for one tick only, and the next tick corrects it.</p>
+<p>The program does not add each small increase. An older version did, and one bad frame added 101 million EXP permanently.</p>
+<p>At a level-up, the program closes the old level and opens a new one. The old level adds its level total minus its start EXP. The new level starts from zero. The percent is the sum for each level: 40% of one level and 5% of the next level shows 45%.</p>
 
-<h3>HP and MP lost: added up, behind guards <span class="file">loss.py</span></h3>
-<p>Loss cannot be measured as end minus start. A character who takes 5,000 damage and drinks potions back to full has the same start and end as one who stood still. So loss has to be added up tick by tick, and that makes every bad reading permanent. <code>LossTracker</code> therefore checks each reading twice before counting it:</p>
+<h3>HP loss and MP loss: a sum, with two tests <span class="file">loss.py</span></h3>
+<p>Loss cannot be "end minus start". If you lose 5,000 HP and use potions, the start and the end are the same. Thus the program adds each decrease, tick by tick. A wrong reading in a sum stays permanently, so <code>LossTracker</code> tests each reading two times:</p>
 <ul>
-  <li><strong>The maximum must be stable.</strong> Max HP and MP only change at level-up. A different maximum means the text was misread, typically a digit sliding across the slash (<code>1663/2816</code> read as <code>16632/816</code>). A new maximum is accepted after 2 ticks if the level also rose, 3 otherwise, and never if it is more than double or less than half the old one.</li>
-  <li><strong>Big jumps wait for a second opinion.</strong> A change of more than half the maximum in one tick is held aside. If the next reading is near it, it was real and is counted one tick late. If the next reading is normal, it is forgotten.</li>
+  <li><strong>The maximum must stay the same.</strong> Max HP and max MP change only at a level-up. A different maximum shows a wrong reading. Example: <code>1663/2816</code> read as <code>16632/816</code>. The program accepts a new maximum after 2 ticks if the level also increased, or after 3 ticks if not. It never accepts a maximum that is more than 2 times or less than half of the old one.</li>
+  <li><strong>A large change must occur two times.</strong> If the value changes by more than half of the maximum in one tick, the program waits. If the next reading is near, the change is real and the program counts it one tick later. If the next reading is normal, the program ignores the change.</li>
 </ul>
-<p>Before these guards, an idle character once "lost" 142,258 MP in a session, about fifty times its maximum, entirely from misreads.</p>
+<p>Before these tests, a character that did not move "lost" 142,258 MP in one session. All of it came from wrong readings.</p>
 
-<h3>Calibration: do not trust the first frame <span class="file">rate.py</span></h3>
-<p>When a session starts, nothing is counted until max HP, max MP and the starting EXP have each been confirmed: the same value on 3 ticks, or 2 if something on the bar moved between them. The window shows "Calibrating" meanwhile. This exists because the first screenshot after starting can be wrong, and a wrong maximum would then reject every correct reading after it.</p>
-<p>Calibration can still be fooled by a misread that repeats while the character is idle. So once the level total is known, the starting EXP is checked against it, and replaced by the earliest reading that agrees if it turns out to have been a misread.</p>
+<h3>Calibration: do not use the first frame <span class="file">rate.py</span></h3>
+<p>When a session starts, the program first confirms three values: max HP, max MP and start EXP. Each value must be the same in 3 ticks, or in 2 ticks if something on the stat bar changed. During this time the status shows "Calibrating" and the program counts nothing.</p>
+<p>A character that does not move can repeat one wrong reading, and calibration can accept it. Thus, when the level total is known, the program tests the start EXP again. If the start EXP is wrong, the program replaces it with the first reading that agrees with the level total.</p>
 
 <h2 id="session">Sessions</h2>
-<p>A session is one measured stretch of play with a fixed starting point. "EXP gained" always means since this session started. The window has three states.</p>
+<p>A session is one period of play with a fixed start. "EXP diff" always means: since this session started. The program has three states.</p>
 
 <figure>
   <div class="scroll">
-  <svg viewBox="0 0 860 220" role="img" aria-label="Session states. Stopped goes to Running on Start. Running and Paused switch with Pause and Resume. Stop or the timer ending saves the session to History and returns to Stopped. Restart saves and begins a new session.">
+  <svg viewBox="0 0 860 220" role="img" aria-label="States: Stopped goes to Running with Start. Running and Paused change with Pause and Resume. Stop or the end of the timer saves the session and goes to Stopped. Restart saves the session and starts a new one.">
     <defs>
       <marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0L10 5L0 10z" fill="currentColor"/></marker>
     </defs>
@@ -288,75 +398,63 @@ footer { margin-top: 56px; font-size: 0.82rem; color: var(--ink-faint); }
     </g>
     <g font-size="11" text-anchor="middle">
       <text x="272" y="90">Start</text>
-      <text x="272" y="142">Stop, or timer ends (saved to History)</text>
+      <text x="272" y="142">Stop, or timer ends (saved)</text>
       <text x="587" y="90">Pause</text>
       <text x="587" y="142">Resume</text>
-      <text x="430" y="200">Stop (saved to History)</text>
-      <text x="430" y="26">Restart (saved, new session begins)</text>
+      <text x="430" y="200">Stop (saved)</text>
+      <text x="430" y="26">Restart (saved, new session starts)</text>
     </g>
   </svg>
   </div>
-  <figcaption>The window opens in Stopped and counts nothing until Start is pressed. It keeps reading and displaying the game in every state; the state only decides whether readings are counted.</figcaption>
+  <figcaption>The three states. The program reads and shows the game in all states. The state only decides if the program counts the readings.</figcaption>
 </figure>
 
 <ul>
-  <li><strong>Timer.</strong> A session lasts the interval set in Settings (1 to 60 minutes, default 10). When it ends the session is saved to History and, by default, the window stops. With auto-stop off, the next session begins at once.</li>
-  <li><strong>Pause.</strong> The clock freezes and nothing is counted. On Resume, HP, MP and EXP are re-anchored to what is on screen, so whatever happened during the pause is not counted either way. EXP re-anchors on the first trusted reading, not simply the first one.</li>
-  <li><strong>History.</strong> Each finished session becomes a card: duration, start and end EXP, gain, HP and MP lost. Cards can be renamed or deleted. History lives in memory only and is gone when the window closes.</li>
+  <li><strong>Timer.</strong> The session length is in Settings (default: 10 minutes). The timer uses real time. It continues when the program cannot read the game.</li>
+  <li><strong>Pause and Resume.</strong> At Resume, the program takes new start points for HP, MP and EXP from the screen. For EXP, it waits for the first good reading.</li>
+  <li><strong>Saved session.</strong> A saved session is a <code>SessionSummary</code>: start time, end time, start EXP, end EXP, EXP diff, percent, HP loss, MP loss, level total and session length.</li>
 </ul>
-
-<h2 id="hud">What the window shows</h2>
-<div class="table scroll"><table>
-  <tr><th>Row</th><th>Where the number comes from</th></tr>
-  <tr><td>LV, HP, MP</td><td>The latest reading, or the last known one if this tick's was blank or impossible.</td></tr>
-  <tr><td>EXP and its %</td><td>The last reading that agreed with the level total. A rejected reading leaves the previous one up.</td></tr>
-  <tr><td>Start EXP</td><td>EXP when the session began, after calibration.</td></tr>
-  <tr><td>EXP diff and its %</td><td>Gain since the session began, counted per level segment; the percentage is summed level by level.</td></tr>
-  <tr><td>Level-up ETA</td><td>(level total &minus; current EXP) &divide; (gain &divide; elapsed time). Shown after 3 seconds of positive gain.</td></tr>
-  <tr><td>Est. session EXP</td><td>The gain so far, stretched to the full session interval at the current rate.</td></tr>
-  <tr><td>HP loss, MP loss</td><td>Running totals from <code>LossTracker</code>.</td></tr>
-  <tr><td>Status pill</td><td>In order of priority: cannot read the game, Paused, Stopped, Calibrating, Idle (nothing has moved), Tracking. Capture problems (window not found, minimized, covered) replace it while they last.</td></tr>
-</table></div>
 
 <h2 id="files">File map</h2>
-<p>Everything is under <code>src/maple_analyzer/</code>. The engine files know nothing about the window; <code>overlay.py</code> only calls the session's public methods.</p>
+<p>All program files are in <code>src/maple_analyzer/</code>. The files that read and count do not know about the window. <code>overlay.py</code> only calls the public functions of the session.</p>
 <div class="table scroll"><table>
-  <tr><th>File</th><th>Job</th></tr>
-  <tr><td class="mono">regions.py</td><td>Where each field is on screen.</td></tr>
-  <tr><td class="mono">capture.py</td><td>Find the game window, refuse a covered bar, grab the field images.</td></tr>
-  <tr><td class="mono">ocr.py</td><td>Prepare each image and read its text.</td></tr>
-  <tr><td class="mono">parser.py</td><td>Text to numbers, or blanks.</td></tr>
-  <tr><td class="mono">exp_total.py</td><td>The level's total EXP by agreement; accept or reject each EXP reading.</td></tr>
-  <tr><td class="mono">loss.py</td><td>HP and MP loss with the two guards.</td></tr>
-  <tr><td class="mono">rate.py</td><td><code>Session</code>: calibration, EXP gain per level, pause and resume, the finished <code>SessionSummary</code>.</td></tr>
-  <tr><td class="mono">overlay.py</td><td>The window, the tick loop, buttons, History, Settings.</td></tr>
-  <tr><td class="mono">settings.py</td><td>All settings in one struct.</td></tr>
-  <tr><td class="mono">i18n.py</td><td>Every on-screen string, in English and Traditional Chinese.</td></tr>
+  <tr><th>File</th><th>Function</th></tr>
+  <tr><td class="mono">regions.py</td><td>The position of each field on the screen.</td></tr>
+  <tr><td class="mono">capture.py</td><td>Finds the game window, makes sure the stat bar is not covered, captures the field images.</td></tr>
+  <tr><td class="mono">ocr.py</td><td>Prepares each image and reads its text.</td></tr>
+  <tr><td class="mono">parser.py</td><td>Changes text into numbers or empty values.</td></tr>
+  <tr><td class="mono">exp_total.py</td><td>Finds the level total. Accepts or ignores each EXP reading.</td></tr>
+  <tr><td class="mono">loss.py</td><td>HP loss and MP loss, with the two tests.</td></tr>
+  <tr><td class="mono">rate.py</td><td><code>Session</code>: calibration, EXP diff for each level, pause and resume, <code>SessionSummary</code>.</td></tr>
+  <tr><td class="mono">overlay.py</td><td>The window, the tick loop, the buttons, History, Settings.</td></tr>
+  <tr><td class="mono">settings.py</td><td>All settings in one structure.</td></tr>
+  <tr><td class="mono">i18n.py</td><td>All text on the window, in English and Traditional Chinese.</td></tr>
 </table></div>
-<p>Outside the package: <code>scripts/run_overlay.py</code> starts the program, <code>scripts/build_exe.bat</code> builds the Windows exe, <code>tests/</code> holds the test suite and the recorded readings it replays, and <code>samples/</code> holds the one real screenshot.</p>
+<p>Other folders: <code>scripts/run_overlay.py</code> starts the program. <code>scripts/build_exe.bat</code> builds the Windows exe. <code>tests/</code> contains the tests and the recorded readings. <code>samples/</code> contains the one real screenshot.</p>
 
-<h2 id="verify">Testing and debugging</h2>
-<pre>.venv/bin/python -m pytest tests/ -q        # 181 tests, about 4 seconds</pre>
-<p>The tests run on Linux with no game. Three kinds are worth knowing:</p>
+<h2 id="verify">Tests and debug</h2>
+<pre>.venv/bin/python -m pytest tests/ -q        # 181 tests, approximately 4 seconds</pre>
+<p>The tests run on Linux without the game. There are three types:</p>
 <ul>
-  <li><strong>Real OCR on the real screenshot</strong> (<code>test_ocr_pipeline.py</code>). The only proof that the pixel boxes land on the text.</li>
-  <li><strong>Replays of recorded sessions</strong> (<code>test_exp_total.py</code>, <code>test_captured_regression.py</code>, <code>test_levelup.py</code>). The exact text OCR produced during real play is fed back through the tick loop. Every bug described on this page has one.</li>
-  <li><strong>Window behaviour without a window</strong> (<code>test_run_state.py</code>). The real <code>OverlayApp</code> methods run against stand-in widgets.</li>
+  <li><strong>Real OCR on the real screenshot</strong> (<code>test_ocr_pipeline.py</code>). This test shows that the field boxes are in the correct position.</li>
+  <li><strong>Replay of recorded sessions</strong> (<code>test_exp_total.py</code>, <code>test_captured_regression.py</code>, <code>test_levelup.py</code>). The tests send the text from real play through the tick loop again. Each problem on this page has a test of this type.</li>
+  <li><strong>Window logic without a window</strong> (<code>test_run_state.py</code>). The real <code>OverlayApp</code> functions run with simple replacement widgets.</li>
 </ul>
-<p>When something looks wrong during play:</p>
+<p>If a value looks wrong during play, start the program from source:</p>
 <pre>.venv\Scripts\python scripts\run_overlay.py &gt; run.log
 .venv\Scripts\python scripts\run_overlay.py --save-crops crops</pre>
-<p>Run from source, the program prints every tick: the raw OCR text, what it parsed to, and a line whenever an EXP reading was rejected. The built exe prints nothing. <code>--save-crops</code> writes the exact image behind each rejected reading into a folder with an index of what OCR made of it. Those images are what is needed to improve the OCR itself.</p>
+<p>The first command writes each tick to a log: the OCR text, the parsed values, and a line for each EXP reading that the program ignored. The exe does not write a log. The second command saves the image of each reading that the program ignored, with an index file. These images are necessary to make the OCR better.</p>
 
-<h2 id="limits">Known limits</h2>
+<h2 id="limits">Limits</h2>
 <ul>
-  <li><strong>Windows only, 1366&times;768 only verified.</strong> The game must be the focused window; it dims when it is not, and nothing can be read.</li>
-  <li><strong>OCR is still wrong about one EXP reading in six.</strong> The program rejects those readings instead of showing them, so during a run of misreads the EXP row holds its last good value. The longest hold in the recording was about 50 seconds, while the character stood still.</li>
-  <li><strong>MP can be under-counted.</strong> A leading 1 in MP is sometimes read as 7 (<code>7200</code> for 1200). Those ticks are dropped, so MP spent during them is not seen until the next good reading.</li>
-  <li><strong>A level-up during a pause is not counted.</strong> No ticks were seen, so the finished level's EXP cannot be reconstructed.</li>
-  <li><strong>Nothing is saved to disk.</strong> History and settings reset when the window closes.</li>
-  <li><strong>At very high levels the level total takes longer to establish</strong>, because EXP has to move 0.05% of the level first. Until then the looser check is in effect.</li>
+  <li><strong>Windows only.</strong> Only 1366&times;768 is tested. The game must be the active window.</li>
+  <li><strong>OCR is still wrong for approximately one EXP reading in six.</strong> The program ignores these readings. Thus the EXP row can stay the same for some seconds. In the recording, the longest time was approximately 50 seconds, when the character did not move.</li>
+  <li><strong>MP loss can be too small.</strong> OCR at times reads a first digit 1 as 7 (<code>7200</code> for 1200). The program ignores these ticks, so it does not see MP that you use during them.</li>
+  <li><strong>A level-up during a pause is not counted.</strong></li>
+  <li><strong>The program saves nothing to disk.</strong> History and settings are lost when you close the window.</li>
+  <li><strong>At very high levels, the level total takes more time.</strong> EXP must change by 0.05% of the level first. Before that, the simpler test is active.</li>
+  <li><strong>v1.0.6 is not tested in the live game.</strong> The tests used recorded readings from real play.</li>
 </ul>
 
-<footer>Describes the code on branch <span class="mono">exp-accuracy-and-cleanup</span>. Figures quoted from recordings come from <span class="mono">overlay_verify.log</span> (2026-09-12) and the August capture logs.</footer>
+<footer>This page describes v1.0.6. The numbers from recordings come from <span class="mono">overlay_verify.log</span> (2026-09-12) and the capture logs from August 2026.</footer>
 </div>
