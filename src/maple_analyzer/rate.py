@@ -15,6 +15,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 
+from .exp_total import LevelTotalEstimator
+
 
 @dataclass(frozen=True)
 class SessionSummary:
@@ -345,6 +347,19 @@ class Session:
         self._last_exp: int | None = None
         self._last_level: int | None = None
         self._last_implied_total: float | None = None  # see _exp_reading_is_trusted
+        # Level total by consensus over many readings -- see exp_total.py. The
+        # per-tick cross-check above stays as the fallback for the stretch
+        # before a consensus exists.
+        self._exp_est = LevelTotalEstimator()
+        # The (cur, pct) reading the current segment's baseline came from, if
+        # it was taken before the estimator could vouch for it -- re-checked
+        # once it can (see _verify_baseline).
+        self._baseline_pending: tuple[int, float | None] | None = None
+        # Readings seen while that re-check is pending, in arrival order --
+        # where a replacement baseline comes from if the first one fails it.
+        self._pending_readings: list[tuple[int, float]] = []
+        self._last_pct: float | None = None  # pct that came with _exp_cur
+        self._exp_verdict: bool | None = None  # the estimator's word on this tick
 
         # Calibration state -- see the class docstring. Inert (never
         # consulted) when require_calibration is False.
@@ -356,6 +371,7 @@ class Session:
         self._mp_calib_max: int | None = None
         self._mp_calib_count = 0
         self._exp_calib_baseline: int | None = None
+        self._exp_calib_pct: float | None = None
         self._exp_calib_total: float | None = None
         self._exp_calib_count = 0
         self._calib_last_snapshot: tuple | None = None
@@ -365,6 +381,7 @@ class Session:
         self._pause_started_at: float | None = None
         self._paused_total = 0.0
         self._resume_pending = False
+        self._resume_exp_pending = False
 
     def sync_current(self, exp_cur: int | None, hp_cur: int | None, mp_cur: int | None) -> None:
         """Refresh the cached current values without touching loss/EXP
@@ -376,6 +393,10 @@ class Session:
         the session stopped, not the latest reading, silently under- or
         over-counting whatever changed while it sat idle."""
         if exp_cur is not None:
+            if exp_cur != self._exp_cur:
+                # The percentage on file belonged to the old value; start()
+                # must not pair it with this one as a baseline to re-check.
+                self._last_pct = None
             self._exp_cur = exp_cur
         if hp_cur is not None:
             self._hp_cur = hp_cur
@@ -399,10 +420,16 @@ class Session:
         self._banked = 0
         self._segment_start = self._exp_cur
         self._last_exp = self._exp_cur
+        self._baseline_pending = (
+            (self._exp_cur, self._last_pct)
+            if self._exp_cur is not None and self._exp_est.total is None else None
+        )
+        self._pending_readings = []
         self._paused = False
         self._pause_started_at = None
         self._paused_total = 0.0
         self._resume_pending = False
+        self._resume_exp_pending = False
 
     # ---- pause/resume -------------------------------------------------
 
@@ -431,23 +458,30 @@ class Session:
         self._paused = False
         self._pause_started_at = None
         self._resume_pending = True
+        self._resume_exp_pending = True
 
     @property
     def is_paused(self) -> bool:
         return self._paused
 
-    def _rebaseline_after_resume(self, exp_cur: int | None, hp_cur: int | None, mp_cur: int | None) -> None:
-        if exp_cur is not None:
-            gained_during_pause = (exp_cur - self._exp_cur) if self._exp_cur is not None else 0
-            # Only ever push segment_start forward -- a level-up during the
-            # pause makes this look like a large drop, which the max(0, ...)
-            # here correctly does NOT treat as a negative gain to claw back;
-            # it just leaves the stale segment_start behind, i.e. the
-            # documented "nothing banked" gap for that case.
-            if self._segment_start is not None:
-                self._segment_start += max(0, gained_during_pause)
-            self._exp_cur = exp_cur
-            self._last_exp = exp_cur
+    def _rebaseline_exp_after_resume(self, exp_cur: int) -> None:
+        """Run on the first *trusted* EXP reading after a resume, which is
+        not necessarily the first tick: about one live EXP reading in six is
+        misread (see exp_total.py), and re-anchoring on one with an extra
+        digit pushed the baseline past anything the session would ever reach,
+        pinning EXP gained at 0 for the rest of the session."""
+        gained_during_pause = (exp_cur - self._exp_cur) if self._exp_cur is not None else 0
+        # Only ever push segment_start forward -- a level-up during the
+        # pause makes this look like a large drop, which the max(0, ...)
+        # here correctly does NOT treat as a negative gain to claw back;
+        # it just leaves the stale segment_start behind, i.e. the
+        # documented "nothing banked" gap for that case.
+        if self._segment_start is not None:
+            self._segment_start += max(0, gained_during_pause)
+        self._exp_cur = exp_cur
+        self._last_exp = exp_cur
+
+    def _rebaseline_after_resume(self, hp_cur: int | None, mp_cur: int | None) -> None:
         if hp_cur is not None:
             self._hp.rebaseline(hp_cur)
             self._hp_cur = hp_cur
@@ -508,6 +542,7 @@ class Session:
         weight = 2 if live else 1
         if self._exp_calib_baseline is None:
             self._exp_calib_baseline = exp_cur
+            self._exp_calib_pct = exp_pct
             self._exp_calib_total = implied
             self._exp_calib_count = weight
         else:
@@ -521,6 +556,7 @@ class Session:
                     self._exp_calib_total = implied
             else:
                 self._exp_calib_baseline = exp_cur
+                self._exp_calib_pct = exp_pct
                 self._exp_calib_total = implied
                 self._exp_calib_count = weight
         if self._exp_calib_count >= self.CALIB_TARGET:
@@ -538,12 +574,26 @@ class Session:
         enable _LossTracker's max-stability guard (which catches the
         high-magnitude OCR misreads), and the level is what tells a level-up
         apart from a misread when EXP drops -- see _record_exp."""
+        # Before the pause check: the estimator learns from every reading it
+        # is shown, whether or not the session is counting right now.
+        level_total_before = self._exp_est.total
+        self._exp_verdict = self._exp_est.observe(exp_cur, exp_pct, level)
+        if (
+            self._baseline_pending is not None and exp_cur is not None and exp_pct
+            and len(self._pending_readings) < self.PENDING_READINGS_MAX
+            and (exp_cur, exp_pct) not in self._pending_readings
+        ):
+            self._pending_readings.append((exp_cur, exp_pct))
+
         if self._paused:
             return
 
         if self._resume_pending:
             self._resume_pending = False
-            self._rebaseline_after_resume(exp_cur, hp_cur, mp_cur)
+            self._rebaseline_after_resume(hp_cur, mp_cur)
+            if exp_cur is not None and self._exp_verdict is not False:
+                self._resume_exp_pending = False
+                self._rebaseline_exp_after_resume(exp_cur)
             return  # this tick only re-anchors; accounting resumes next tick
 
         if self._require_calibration and not self._calibrated:
@@ -562,6 +612,8 @@ class Session:
             self._start_exp = self._exp_calib_baseline
             self._segment_start = self._exp_calib_baseline
             self._last_exp = self._exp_calib_baseline
+            self._baseline_pending = (self._exp_calib_baseline, self._exp_calib_pct)
+            self._pending_readings = []
             self._start_time = time.time()
             # Fall through -- this confirming tick's own readings are still
             # real data, not spent purely on calibration.
@@ -576,7 +628,21 @@ class Session:
             self._hp_cur = hp_cur
         if mp_cur is not None:
             self._mp_cur = mp_cur
-        self._record_exp(exp_cur, exp_pct, level)
+        self._record_exp(exp_cur, exp_pct, level, level_total_before)
+
+    def observe_exp(self, exp_cur: int | None, exp_pct: float | None, level: int | None = None) -> None:
+        """Show the level-total estimator a reading without recording it --
+        for the ticks a session is paused, stopped or not started, when the
+        HUD is still reading the game and still has percentages to display.
+        Call this *or* record() for a tick, never both: the estimator counts
+        ticks."""
+        self._exp_est.observe(exp_cur, exp_pct, level)
+
+    @property
+    def exp_reading(self) -> tuple[int | None, float | None]:
+        """The last trusted (EXP, percentage) reading -- what the HUD should
+        show. See LevelTotalEstimator.reading."""
+        return self._exp_est.reading
 
     # A reading may deviate this far from the level total established by the
     # previous tick before it is treated as garbage. Deliberately loose: it is
@@ -595,6 +661,9 @@ class Session:
         learned from the data: in the live capture the bad value was the
         majority (379 of 429 ticks), so anything that learned would have
         learned 22,768 and rejected every correct reading afterwards.
+        (exp_total.py does learn a total, and gets away with it because it
+        counts *distinct* readings: that majority was one reading repeated,
+        which counts once. Its verdict, when it has one, replaces this check.)
 
         This mainly protects finalize(). Segments (see _record_exp) already
         make a bad frame transient, but a summary freezes one instant, and a
@@ -602,6 +671,16 @@ class Session:
         """
         if level is not None and level != self._last_level:
             self._last_implied_total = None  # new level, new total: re-baseline
+        # The consensus total, once there is one, is a far tighter test than
+        # the tick-to-tick band below (pct's display precision, against 25%),
+        # and it cannot be led astray by the previous tick having been the bad
+        # one. It abstains (None) until established, and right after a
+        # level-up, when it has just reset itself.
+        verdict = self._exp_verdict
+        if verdict is not None:
+            if verdict and exp_pct:
+                self._last_implied_total = exp_cur / (exp_pct / 100)
+            return verdict
         if exp_pct:
             implied = exp_cur / (exp_pct / 100)
             if self._last_implied_total:
@@ -621,7 +700,52 @@ class Session:
                 return False
         return True
 
-    def _record_exp(self, exp_cur: int | None, exp_pct: float | None, level: int | None) -> None:
+    PENDING_READINGS_MAX = 300
+
+    def _verify_baseline(self, exp_cur: int) -> None:
+        """Re-check a baseline that was taken before the estimator had a
+        total to check it against, now that it has one.
+
+        Calibration and start() can only cross-check a reading against its
+        neighbours, and an idle character repeats one misread for as long as
+        it stands still -- so the baseline can be a misread. Live case
+        (overlay_std_capture_run5.log): 'EXP S255[1 12%]' for 5255, held for
+        379 ticks, became a baseline of 255 and the session finished 5,000
+        EXP over what was really gained.
+
+        A baseline that disagrees with the level total is replaced by the
+        earliest reading since then that does agree with it. "Earliest" needs
+        one more condition, because a reading that lost a digit from *both*
+        numbers also agrees with the total ('8721[111%]' for 87210[11.04%]):
+        it must have another agreeing reading just above it, which a stray
+        tenth-of-the-value reading does not. Failing that the current reading
+        is used -- the gain so far is lost, but none is invented.
+        """
+        pending = self._baseline_pending
+        if pending is None or self._exp_est.total is None:
+            return
+        self._baseline_pending = None
+        readings, self._pending_readings = self._pending_readings, []
+        base_cur, base_pct = pending
+        bad = base_cur > exp_cur or (
+            base_pct is not None and self._exp_est.agrees(base_cur, base_pct) is False
+        )
+        if not bad or self._banked != 0 or self._segment_start != base_cur:
+            return
+        good = [c for c, p in readings if c <= exp_cur and self._exp_est.agrees(c, p)]
+        near = self._exp_est.total * 0.02
+        replacement = next(
+            (c for c in good if any(c < other <= c + near for other in good + [exp_cur])),
+            exp_cur,
+        )
+        self._segment_start = replacement
+        if self._start_exp == base_cur:
+            self._start_exp = replacement
+
+    def _record_exp(
+        self, exp_cur: int | None, exp_pct: float | None, level: int | None,
+        level_total_before: float | None = None,
+    ) -> None:
         """Track EXP gained, per level *segment*.
 
         Within a level this is plain end-minus-start, which is the important
@@ -651,7 +775,14 @@ class Session:
         # from cur/pct, so by the time we see the reset it already describes
         # the *new* level. The level just finished has to be measured with the
         # pre-update value, or every level-up under-counts by a level.
-        previous_total = self._total_exp
+        # The consensus total as it stood before this tick is preferred, for
+        # the same reason plus one more: _total_exp is whatever the last
+        # single tick implied, misread or not.
+        previous_total = level_total_before or self._total_exp
+
+        if self._resume_exp_pending:
+            self._resume_exp_pending = False
+            self._rebaseline_exp_after_resume(exp_cur)
 
         if self._segment_start is None:
             self._segment_start = exp_cur
@@ -674,9 +805,13 @@ class Session:
             # unknown, so its remainder is dropped rather than invented: an
             # under-count, never a fabricated number.
             self._segment_start = 0
+            self._baseline_pending = None  # that baseline belonged to the old level
+        else:
+            self._verify_baseline(exp_cur)
 
         self._last_exp = exp_cur
         self._exp_cur = exp_cur
+        self._last_pct = exp_pct
         if level is not None:
             self._last_level = level
         if exp_cur and exp_pct:
@@ -716,7 +851,10 @@ class Session:
 
     @property
     def total_exp(self) -> float | None:
-        return self._total_exp
+        """EXP the current level needs in total: the consensus over many
+        readings once there is one (see exp_total.py), otherwise what the last
+        trusted tick implied on its own."""
+        return self._exp_est.total or self._total_exp
 
     def projected_exp(self, window_s: float, now: float | None = None) -> int | None:
         """EXP this session would total if the current rate held for the
@@ -739,7 +877,7 @@ class Session:
             end_exp=self._exp_cur,
             hp_loss=self._hp.loss,
             mp_loss=self._mp.loss,
-            total_exp=self._total_exp,
+            total_exp=self.total_exp,
             interval_minutes=interval_minutes,
             exp_gained=self.exp_diff,
         )

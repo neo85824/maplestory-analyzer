@@ -327,6 +327,45 @@ def test_stop_button_visible_while_running_or_paused():
     assert app._stop_button.grid_info() != {}
 
 
+# --- readings that cannot be right are not drawn --------------------------
+
+
+def test_a_current_value_above_its_maximum_is_not_shown():
+    """'MP [7200/3360]' for 1200 -- from a live capture, 142 ticks of it."""
+    app = _StubApp()
+    app._do_tick()
+    assert app._value_labels["mp"].cget("text") == "2800/2816"
+    real = app._source.grab_fields
+    app._source.grab_fields = lambda: {**real(), "MP": "MP [7200/2816]", "HP": "HP [9372/824]"}
+    app._do_tick()
+    assert app._value_labels["mp"].cget("text") == "2800/2816"
+    assert app._value_labels["hp"].cget("text") == "800/824"
+
+
+def test_a_misread_exp_tick_keeps_the_last_good_row_and_percentages():
+    """'98700[1 50%]' for 12.50%: v1.0.5 drew 1.50% on the EXP row and worked
+    the gained/projected percentages out against a level ten times too big."""
+    app = _StubApp()
+    app._on_pause_button_clicked()  # start tracking
+    app._source.exp = 60_000
+    _calibrate(app, gains=(150,) * 8)
+    good_row = app._value_labels["exp"].cget("text")
+    good_gain = app._value_labels["expdiff"].cget("text")
+    assert good_row == "61,200  (12.24%)"
+    assert good_gain.endswith("(+0.24%)")
+
+    real = app._source.grab_fields
+    app._source.grab_fields = lambda: {**real(), "EXP": "EXP 61200[1 24%]"}
+    app._do_tick()
+    assert app._value_labels["exp"].cget("text") == good_row
+    assert app._value_labels["expdiff"].cget("text") == good_gain
+
+    app._source.grab_fields = lambda: {**real(), "EXP": "EXP 6120[12 24%]"}
+    app._do_tick()
+    assert app._value_labels["exp"].cget("text") == good_row
+    assert app._value_labels["expdiff"].cget("text") == good_gain
+
+
 # --- timer/auto-finalize survive a blocked capture window -----------------
 
 
@@ -334,7 +373,10 @@ def test_timer_label_keeps_moving_while_capture_is_blocked():
     app = _StubApp()
     app._on_pause_button_clicked()
     _calibrate(app, gains=(100,))
-    app._session._start_time -= 5
+    # 4.5s, not 5: the label truncates to whole seconds, so exactly 5s plus
+    # the microseconds this test takes to run read "9:54" about one run in
+    # three. Half a second of margin either side makes it deterministic.
+    app._session._start_time -= 4.5
     app._source.blocked = True
     app._do_tick()
     assert app._timer_label.cget("text") == app._t("timer_left", time="9:55")

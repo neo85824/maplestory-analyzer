@@ -40,7 +40,19 @@ _EXP_CUR_RE = re.compile(r"EXP\D{0,3}(\d+)\s*[\[({]", re.IGNORECASE)
 # with it the EXP% display and the level-up ETA. All forms captured here;
 # _normalize_pct interprets them. A bare 1-2 digit run is deliberately NOT
 # matched, ambiguous with stray adjacent OCR noise.
-_EXP_PCT_RE = re.compile(r"(\d{1,2}[.\s:]\d{1,2}|\d{3,4})\s*%")
+#
+# Tightened 2026-11-17 after a 29-minute capture on the new HUD, in three ways
+# that all turn a *wrong* percentage into a missing one (which rate.py and the
+# HUD can fill in from the level total -- a wrong one they would have shown):
+#
+# - The whole run between the bracket and the '%' must be the percentage. It
+#   used to be searched for anywhere after the bracket, so '[11 738%]' (an
+#   extra digit; really 11.78) matched its tail and came out as 7.38.
+# - Exactly two decimals. The game always prints two, so '[11 2%]' has lost a
+#   digit (really 11.32) and is not 11.2.
+# - More separators: the decimal point also arrives as ',', ' .', ' -', ':-'
+#   and similar. '[12,19%]' used to yield no percentage at all.
+_EXP_PCT_RE = re.compile(r"\s*(\d{1,2}[.\s:,;\-]{1,3}\d{2}|\d{3,4})\s*%")
 _LV_RE = re.compile(r"LV\.?\D{0,3}(\d+)", re.IGNORECASE)
 
 
@@ -59,7 +71,7 @@ def _normalize_pct(raw: str) -> float:
     # Recognition-only OCR on the tiny EXP field font sometimes reads the
     # decimal point as a space ('63 14%') or a colon ('75:11%') rather than
     # dropping it outright -- treat both the same as a dot.
-    raw = raw.replace(" ", ".").replace(":", ".")
+    raw = re.sub(r"[.\s:,;\-]+", ".", raw)
     if "." in raw:
         return float(raw)
     if len(raw) > 2:
@@ -79,7 +91,7 @@ def _find_exp(text: str) -> tuple[int | None, float | None]:
     if not m:
         return None, None
     cur = int(m.group(1))
-    pm = _EXP_PCT_RE.search(text[m.end():])
+    pm = _EXP_PCT_RE.match(text, m.end())
     pct = _normalize_pct(pm.group(1)) if pm else None
     return cur, pct
 

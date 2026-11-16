@@ -735,11 +735,20 @@ class OverlayApp:
         # of flickering to '--' on every miss; a field that's genuinely gone
         # (e.g. OCR permanently broken) will just show stale data, which is a
         # more honest failure mode than a blank field for a live number.
+        #
+        # A current value above its own maximum is not a reading at all --
+        # 'MP [7200/3360]' for 1200 was 142 ticks of a live capture, each one
+        # drawn on the HUD as 7200/3360 with a full bar. Session already
+        # refuses those (rate.py's _LossTracker); blanking them here first
+        # makes the HUD hold the last real value too.
+        if snap.hp_cur is not None and snap.hp_max is not None and snap.hp_cur > snap.hp_max:
+            snap.hp_cur = snap.hp_max = None
+        if snap.mp_cur is not None and snap.mp_max is not None and snap.mp_cur > snap.mp_max:
+            snap.mp_cur = snap.mp_max = None
         merged = StatSnapshot(*(
             new if new is not None else old
             for new, old in zip(vars(snap).values(), vars(self._last).values())
         ))
-        self._last = merged
         # hp_max/mp_max are passed purely so Session can sanity-check them --
         # a tick whose max doesn't match the rest of the session was misparsed
         # (see rate.py's _LossTracker) and is dropped before it can inflate the
@@ -758,11 +767,39 @@ class OverlayApp:
         # at all (see _run_state's docstring in __init__), and feeding it
         # ticks here would silently begin calibrating/tracking a session the
         # user hasn't asked for yet.
+        #
+        # EXP goes in as this tick's own reading (None when unreadable), not
+        # the carried-forward one: cur and pct only mean something as a pair
+        # from the same frame (their ratio is the level total), and the
+        # generic merge above pairs this tick's cur with an older tick's pct
+        # whenever the percentage alone fails to parse.
+        exp_cur = snap.exp_cur
+        exp_pct = snap.exp_pct if exp_cur is not None else None
         if self._run_state == "running":
             self._session.record(
-                merged.exp_cur, merged.hp_cur, merged.mp_cur, merged.exp_pct,
+                exp_cur, merged.hp_cur, merged.mp_cur, exp_pct,
                 hp_max=merged.hp_max, mp_max=merged.mp_max, level=merged.level,
             )
+        else:
+            # Still shown to the level-total estimator, so the percentages on
+            # screen are right while stopped/paused and already settled by the
+            # time a session starts.
+            self._session.observe_exp(exp_cur, exp_pct, merged.level)
+        # What the HUD shows for EXP is the last reading that agreed with the
+        # level total established over many ticks (exp_total.py). About one
+        # live reading in six is a misread -- '98700[1 50%]' for 12.50% -- and
+        # those are treated like an unreadable field: the last good pair stays.
+        merged.exp_cur, merged.exp_pct = self._session.exp_reading
+        if exp_cur is not None and exp_cur != merged.exp_cur:
+            # Debug runs only (the .exe logs to nul): without this line a log
+            # shows what was read but not that it was thrown away, or why.
+            total = self._session.total_exp
+            self._log(
+                f"          EXP reading rejected: {exp_cur} [{exp_pct}%] disagrees with level total "
+                f"~{total:,.0f}; showing {merged.exp_cur}" if total else
+                f"          EXP reading rejected: {exp_cur} [{exp_pct}%]; showing {merged.exp_cur}"
+            )
+        self._last = merged
 
         self._maybe_finalize_on_timeout()
 
@@ -1130,7 +1167,15 @@ class OverlayApp:
         # directly) is more robust since per-level EXP totals are constant,
         # while independently-read percentages carry their own OCR noise on
         # top of the cur value's.
-        total_exp = snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
+        #
+        # A single tick is only the fallback now: about one live reading in
+        # six is misread, and dividing by that tick's own total showed e.g.
+        # an EXP gain of +0.21% for a real +2.1% whenever '12.50%' was read as
+        # '1 50%'. The session's level total is a consensus over many readings
+        # and does not move with one bad tick -- see exp_total.py.
+        total_exp = self._session.total_exp or (
+            snap.exp_cur / (snap.exp_pct / 100) if snap.exp_cur and snap.exp_pct else None
+        )
 
         if exp_diff is not None:
             pct_s = f"  (+{exp_diff / total_exp * 100:.2f}%)" if total_exp and self._settings.show_exp_pct else ""
